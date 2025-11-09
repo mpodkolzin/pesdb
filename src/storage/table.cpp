@@ -23,7 +23,13 @@ Table::Table(const TableSchema* schema, BufferPoolManager* bpm) : schema_(schema
     page_id_t current_page_id = schema->columns[0].first_page_id;
     while (current_page_id != INVALID_PAGE_ID) {
         Page* page = bpm_->FetchPage(current_page_id);
-        if (page == nullptr) throw std::runtime_error("Failed to fetch page to count rows.");
+        std::cout << "Fetching page " << current_page_id << std::endl;
+        if (page == nullptr) 
+        { 
+
+            std::cout << "Failed to fetch page to count rows." << std::endl;
+            throw std::runtime_error("Failed to fetch page to count rows.");
+        }
         page->r_latch();
 
         auto* data_page = reinterpret_cast<ColumnDataPage*>(page->data());
@@ -41,6 +47,9 @@ Table::Table(const TableSchema* schema, BufferPoolManager* bpm) : schema_(schema
         current_page_id = schema->columns[i].first_page_id;
         while (current_page_id != INVALID_PAGE_ID) {
             Page* page = bpm_->FetchPage(current_page_id);
+            if (page == nullptr) {
+                throw std::runtime_error("Failed to fetch page to count rows for column " + std::to_string(i));
+            }
             page->r_latch();
             auto* data_page = reinterpret_cast<ColumnDataPage*>(page->data());
             last_page_ids_[i] = current_page_id;
@@ -81,6 +90,13 @@ bool Table::InsertTuple(const std::vector<int64_t>& tuple) {
             page = new_page_raw;
             page->w_latch();
             data_page = reinterpret_cast<ColumnDataPage*>(page->data());
+            
+            // --- START FIX ---
+            // We MUST initialize the new page header, just like in the Catalog!
+            data_page->next_page_id_ = INVALID_PAGE_ID;
+            data_page->value_count_ = 0;
+            // --- END FIX ---
+
             last_page_ids_[i] = new_pid;
         }
 

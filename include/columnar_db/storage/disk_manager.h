@@ -12,7 +12,8 @@ public:
     explicit DiskManager(const std::string& db_file);
     ~DiskManager();
 
-    void ReadPage(page_id_t page_id, char* page_data);
+    // Change void to bool
+    bool ReadPage(page_id_t page_id, char* page_data);
     void WritePage(page_id_t page_id, const char* page_data);
     page_id_t AllocatePage();
 

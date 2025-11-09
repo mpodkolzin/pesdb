@@ -1,5 +1,4 @@
 add_library(storage STATIC
-  in_memory_table.cpp
   buffer_pool_manager.cpp
   disk_manager.cpp
   table.cpp

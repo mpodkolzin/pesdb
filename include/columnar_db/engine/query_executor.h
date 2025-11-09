@@ -1,24 +1,43 @@
 #pragma once
 
-namespace hsql { class SQLStatement; }
-namespace db { class InMemoryTable; }
+#include "columnar_db/storage/buffer_pool_manager.h"
+#include "columnar_db/storage/catalog.h"
+
+namespace hsql { struct SQLStatement; }
 
 namespace db {
 
-// Executes parsed SQL statements against a given table.
+/**
+ * @class QueryExecutor
+ * @brief Executes parsed SQL statements against the persistent storage.
+ */
 class QueryExecutor {
 public:
-    // The executor is tied to a specific table.
-    explicit QueryExecutor(InMemoryTable& table);
+    /**
+     * @brief Constructs a new QueryExecutor.
+     * @param catalog The database catalog to find table schemas.
+     * @param bpm The buffer pool manager to pass to Table objects.
+     */
+    QueryExecutor(Catalog* catalog, BufferPoolManager* bpm);
 
-    // Main entry point for executing a statement.
-    void execute(const hsql::SQLStatement* statement);
+    /**
+     * @brief Main entry point for executing a parsed statement.
+     */
+    void Execute(const hsql::SQLStatement* statement);
 
 private:
-    void execute_select(const hsql::SQLStatement* statement);
+    /**
+     * @brief Executes a SELECT statement.
+     */
+    void ExecuteSelect(const hsql::SQLStatement* statement);
 
-    // A reference to the table we are querying.
-    InMemoryTable& _table;
+    /**
+     * @brief Executes an INSERT statement.
+     */
+    void ExecuteInsert(const hsql::SQLStatement* statement);
+
+    Catalog* catalog_;
+    BufferPoolManager* bpm_;
 };
 
 } // namespace db
