@@ -3,4 +3,4 @@ add_executable(columnar_db
 )
 
 # The executable needs the engine to run queries
-target_link_libraries(columnar_db PRIVATE engine storage)
+target_link_libraries(columnar_db PRIVATE engine storage wal)

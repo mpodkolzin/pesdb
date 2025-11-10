@@ -6,11 +6,12 @@
 #include "sql/Expr.h"
 #include <iostream>
 #include <functional> // For std::function
+#include "columnar_db/wal/log_manager.h"
 
 namespace db {
 
-QueryExecutor::QueryExecutor(Catalog* catalog, BufferPoolManager* bpm)
-    : catalog_(catalog), bpm_(bpm) {}
+QueryExecutor::QueryExecutor(Catalog* catalog, BufferPoolManager* bpm, LogManager* log_manager)
+    : catalog_(catalog), bpm_(bpm), log_manager_(log_manager) {}
 
 void QueryExecutor::Execute(const hsql::SQLStatement* statement) {
     switch (statement->type()) {
@@ -159,6 +160,15 @@ void QueryExecutor::ExecuteInsert(const hsql::SQLStatement* statement) {
         }
         tuple.push_back(expr->ival);
     }
+
+    LogRecord log_record(LogRecordType::INSERT_TUPLE, table_name, tuple);
+    try {
+        log_manager_->AppendLogRecord(log_record);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: Failed to append log record: " << e.what() << std::endl;
+        return;
+    }
+
 
     // Insert the tuple
     if (table.InsertTuple(tuple)) {

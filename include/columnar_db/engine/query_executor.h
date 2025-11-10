@@ -2,6 +2,7 @@
 
 #include "columnar_db/storage/buffer_pool_manager.h"
 #include "columnar_db/storage/catalog.h"
+#include "columnar_db/wal/log_manager.h"
 
 namespace hsql { struct SQLStatement; }
 
@@ -18,7 +19,7 @@ public:
      * @param catalog The database catalog to find table schemas.
      * @param bpm The buffer pool manager to pass to Table objects.
      */
-    QueryExecutor(Catalog* catalog, BufferPoolManager* bpm);
+    QueryExecutor(Catalog* catalog, BufferPoolManager* bpm, LogManager* log_manager);
 
     /**
      * @brief Main entry point for executing a parsed statement.
@@ -38,6 +39,7 @@ private:
 
     Catalog* catalog_;
     BufferPoolManager* bpm_;
+    LogManager* log_manager_;
 };
 
 } // namespace db

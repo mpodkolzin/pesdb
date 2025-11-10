@@ -1,8 +1,9 @@
 #include "columnar_db/storage/buffer_pool_manager.h"
 #include "columnar_db/storage/catalog.h"
 #include "columnar_db/storage/disk_manager.h"
-#include "columnar_db/engine/query_executor.h" // Include the new executor
-#include "SQLParser.h" // Include the Hyrise SQL Parser
+#include "columnar_db/engine/query_executor.h"
+#include "columnar_db/wal/log_manager.h"
+#include "SQLParser.h"
 
 #include <iostream>
 #include <memory>
@@ -20,6 +21,7 @@ int main() {
     auto disk_manager = std::make_unique<db::DiskManager>(db_file);
     auto buffer_pool_manager = std::make_unique<db::BufferPoolManager>(db::BUFFER_POOL_SIZE, disk_manager.get());
     auto catalog = std::make_unique<db::Catalog>(buffer_pool_manager.get(), is_new_db);
+    auto log_manager = std::make_unique<db::LogManager>("mydb.wal");
 
     // --- 2. Create 'users' table if it doesn't exist (for convenience) ---
     // This is the same logic as before, just to ensure we have a table to query.
@@ -52,7 +54,7 @@ int main() {
     }
 
     // --- 3. Instantiate the Query Executor ---
-    auto query_executor = std::make_unique<db::QueryExecutor>(catalog.get(), buffer_pool_manager.get());
+    auto query_executor = std::make_unique<db::QueryExecutor>(catalog.get(), buffer_pool_manager.get(), log_manager.get());
 
     // --- 4. Start the Read-Evaluate-Print Loop (REPL) ---
     std::string query;
