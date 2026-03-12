@@ -1,209 +1,268 @@
 #include "columnar_db/storage/buffer_pool_manager.h"
+
+#include <algorithm>
 #include <stdexcept>
-#include <vector> // Need this for the temp buffer
 
 namespace db {
 
+// ============================================================================
+// Constructor: Initialize Buffer Pool
+// ============================================================================
+
 BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager* disk_manager)
-    : pool_size_(pool_size), disk_manager_(disk_manager), pages_(pool_size) {
-    for (size_t i = 0; i < pool_size_; ++i) {
-        free_list_.push_back(i);
-    }
+    : pool_size_(pool_size),
+      disk_manager_(disk_manager),
+      pages_(pool_size) {  // Allocate all frames upfront
+
+  // Initially, all frames are free
+  for (size_t i = 0; i < pool_size_; ++i) {
+    free_list_.push_back(static_cast<frame_id_t>(i));
+  }
+
+  // page_table_ and lru_list_ start empty (populated as pages loaded)
 }
+
+// ============================================================================
+// Destructor: Flush All Dirty Pages
+// ============================================================================
 
 BufferPoolManager::~BufferPoolManager() {
-    FlushAllPages();
+  // Critical for durability! Write all dirty pages before shutdown
+  FlushAllPages();
 }
+
+// ============================================================================
+// FetchPage: Get Page from Pool or Disk
+// ============================================================================
 
 Page* BufferPoolManager::FetchPage(page_id_t page_id) {
-    // Use std::unique_lock to allow manually unlocking
-    std::unique_lock<std::mutex> lock(latch_);
+  std::lock_guard<std::mutex> lock(latch_);
 
-    // 1. Search for page in the buffer pool page table.
-    if (page_table_.count(page_id)) {
-        frame_id_t frame_id = page_table_[page_id];
-        pages_[frame_id].pin_count_++;
-        update_replacer(frame_id);
-        return &pages_[frame_id];
-    }
+  // -----------------------------------------------------------------------
+  // Case 1: Page already in pool (cache hit)
+  // -----------------------------------------------------------------------
 
-    // 2. If not found, find a replacement frame (from free list or by evicting).
-    frame_id_t frame_id;
-    if (!free_list_.empty()) {
-        frame_id = free_list_.front();
-        free_list_.pop_front();
-    } else {
-        if (!find_victim_frame(&frame_id)) {
-            return nullptr; // No page can be evicted.
-        }
-    }
+  auto it = page_table_.find(page_id);
+  if (it != page_table_.end()) {
+    // Page found! This is the fast path.
+    frame_id_t frame_id = it->second;
 
-    // 3. We have a victim frame. Get its details *while holding the latch*.
-    bool victim_is_dirty = pages_[frame_id].is_dirty_;
-    page_id_t victim_page_id = pages_[frame_id].page_id();
-    
-    // Copy dirty data to a temp buffer *while holding the latch*.
-    std::vector<char> temp_data;
-    if (victim_is_dirty) {
-        temp_data.assign(pages_[frame_id].data(), pages_[frame_id].data() + PAGE_SIZE);
-    }
+    // Pin the page (increment reference count)
+    // BufferPoolManager is a friend of Page, so can access pin_count_ directly
+    pages_[frame_id].pin_count_++;
 
-    // 4. Update page metadata for the NEW page.
-    page_table_[page_id] = frame_id;
-    pages_[frame_id].page_id_ = page_id;
-    pages_[frame_id].pin_count_ = 1;
-    pages_[frame_id].is_dirty_ = false;
-    pages_[frame_id].reset_memory();
-    replacer_.push_front(frame_id);
-
-    // 5. RELEASE THE LATCH before doing any I/O.
-    lock.unlock();
-
-    // 6. Perform I/O *after* the latch is released.
-    if (victim_is_dirty) {
-        disk_manager_->WritePage(victim_page_id, temp_data.data());
-    }
-    if (!disk_manager_->ReadPage(page_id, pages_[frame_id].data())) {
-        // I/O Error! The page is invalid (e.g., doesn't exist).
-        // We must revert our changes and return nullptr.
-        lock.lock(); // Re-acquire latch to revert state
-        
-        // Undo the changes we made in step 4
-        page_table_.erase(page_id);
-        replacer_.remove(frame_id); // It's at the front
-        free_list_.push_front(frame_id); // Put the frame back on the free list
-        
-        // Reset the frame's metadata to be safe
-        pages_[frame_id].page_id_ = INVALID_PAGE_ID;
-        pages_[frame_id].pin_count_ = 0;
-        
-        lock.unlock();
-        return nullptr; // <--- Signal failure to caller
-    }
+    // Move to front of LRU (most recently used)
+    UpdateLRU(frame_id);
 
     return &pages_[frame_id];
+  }
+
+  // -----------------------------------------------------------------------
+  // Case 2: Page not in pool (cache miss) - need a frame
+  // -----------------------------------------------------------------------
+
+  frame_id_t frame_id;
+
+  // Try to get a free frame first (avoids eviction)
+  if (!free_list_.empty()) {
+    frame_id = free_list_.front();
+    free_list_.pop_front();
+  } else {
+    // No free frames - must evict a victim page
+    if (!FindVictimFrame(&frame_id)) {
+      // All pages are pinned! Cannot evict anything.
+      return nullptr;
+    }
+    // FindVictimFrame already removed victim from page_table_ and lru_list_
+  }
+
+  // -----------------------------------------------------------------------
+  // We have a frame - load page from disk
+  // -----------------------------------------------------------------------
+
+  // Load page data from disk into the frame
+  disk_manager_->ReadPage(page_id, pages_[frame_id].data());
+
+  // Update page metadata (BufferPoolManager is friend, can access private members)
+  pages_[frame_id].page_id_ = page_id;
+  pages_[frame_id].pin_count_ = 1;      // Newly fetched page is pinned
+  pages_[frame_id].is_dirty_ = false;   // Fresh from disk (clean)
+
+  // Update BufferPoolManager metadata
+  page_table_[page_id] = frame_id;       // Register page in page table
+  lru_list_.push_front(frame_id);        // Add to front (most recently used)
+
+  return &pages_[frame_id];
 }
+
+// ============================================================================
+// NewPage: Allocate New Page
+// ============================================================================
 
 Page* BufferPoolManager::NewPage(page_id_t* page_id) {
-    std::unique_lock<std::mutex> lock(latch_);
+  std::lock_guard<std::mutex> lock(latch_);
 
-    // 1. Find a replacement frame.
-    frame_id_t frame_id;
-    if (!free_list_.empty()) {
-        frame_id = free_list_.front();
-        free_list_.pop_front();
-    } else {
-        if (!find_victim_frame(&frame_id)) {
-            return nullptr;
-        }
+  // -----------------------------------------------------------------------
+  // Find a frame for the new page
+  // -----------------------------------------------------------------------
+
+  frame_id_t frame_id;
+
+  // Try free list first
+  if (!free_list_.empty()) {
+    frame_id = free_list_.front();
+    free_list_.pop_front();
+  } else {
+    // No free frames - must evict
+    if (!FindVictimFrame(&frame_id)) {
+      // All pages are pinned! Cannot evict anything.
+      return nullptr;
     }
+  }
 
-    // 2. We have a victim frame. Get its details.
-    bool victim_is_dirty = pages_[frame_id].is_dirty_;
-    page_id_t victim_page_id = pages_[frame_id].page_id();
-    std::vector<char> temp_data;
-    if (victim_is_dirty) {
-        temp_data.assign(pages_[frame_id].data(), pages_[frame_id].data() + PAGE_SIZE);
-    }
-    
-    // 3. "Reserve" the frame by pinning it and resetting.
-    // We can't add to page_table_ yet, as we don't know the new page_id.
-    pages_[frame_id].pin_count_ = 1; 
-    pages_[frame_id].reset_memory();
-    
-    // 4. RELEASE THE LATCH before doing I/O.
-    lock.unlock();
+  // -----------------------------------------------------------------------
+  // Allocate new page on disk
+  // -----------------------------------------------------------------------
 
-    // 5. Perform I/O.
-    if (victim_is_dirty) {
-        disk_manager_->WritePage(victim_page_id, temp_data.data());
-    }
-    // This is also I/O:
-    page_id_t new_page_id = disk_manager_->AllocatePage();
-    *page_id = new_page_id;
+  // DiskManager::AllocatePage() returns the new page_id and initializes it
+  page_id_t new_page_id = disk_manager_->AllocatePage();
+  *page_id = new_page_id;  // Return to caller
 
-    // 6. RE-ACQUIRE LATCH to update metadata safely.
-    lock.lock();
+  // -----------------------------------------------------------------------
+  // Initialize page metadata
+  // -----------------------------------------------------------------------
 
-    // 7. Update metadata for the new page.
-    pages_[frame_id].page_id_ = new_page_id;
-    pages_[frame_id].is_dirty_ = true; // New page is always dirty.
-    // pin_count_ is already 1
-    
-    page_table_[new_page_id] = frame_id;
-    replacer_.push_front(frame_id);
+  pages_[frame_id].page_id_ = new_page_id;
+  pages_[frame_id].pin_count_ = 1;      // New page is pinned (caller will use it)
+  pages_[frame_id].is_dirty_ = true;    // New page is dirty (caller will write to it)
+  pages_[frame_id].ResetMemory();       // Zero out the page data
 
-    return &pages_[frame_id];
+  // Update BufferPoolManager metadata
+  page_table_[new_page_id] = frame_id;
+  lru_list_.push_front(frame_id);
+
+  return &pages_[frame_id];
 }
+
+// ============================================================================
+// UnpinPage: Release Page (Decrement Pin Count)
+// ============================================================================
 
 bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
-    // ... (This function is unchanged)
-    std::lock_guard<std::mutex> lock(latch_);
+  std::lock_guard<std::mutex> lock(latch_);
 
-    if (!page_table_.count(page_id)) {
-        return false;
-    }
+  // Check if page is in the pool
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    return false;  // Page not in pool
+  }
 
-    frame_id_t frame_id = page_table_[page_id];
-    if (pages_[frame_id].pin_count_ <= 0) {
-        return false; // Cannot unpin a page with pin_count <= 0.
-    }
+  frame_id_t frame_id = it->second;
 
-    pages_[frame_id].pin_count_--;
-    if (is_dirty) {
-        pages_[frame_id].is_dirty_ = true;
-    }
-    return true;
+  // Check if already unpinned
+  if (pages_[frame_id].pin_count_ <= 0) {
+    return false;  // Cannot unpin page with pin_count <= 0
+  }
+
+  // Decrement pin count
+  pages_[frame_id].pin_count_--;
+
+  // Update dirty flag (sticky: once dirty, stays dirty until flushed)
+  if (is_dirty) {
+    pages_[frame_id].is_dirty_ = true;
+  }
+
+  return true;
 }
+
+// ============================================================================
+// FlushPage: Write Specific Page to Disk
+// ============================================================================
 
 bool BufferPoolManager::FlushPage(page_id_t page_id) {
-    // ... (This function is unchanged, but note it also does I/O inside a lock!)
-    // ... (This is OK for now, as it's not called during a fetch/new)
-    std::lock_guard<std::mutex> lock(latch_);
+  std::lock_guard<std::mutex> lock(latch_);
 
-    if (!page_table_.count(page_id)) {
-        return false;
-    }
+  // Check if page is in the pool
+  auto it = page_table_.find(page_id);
+  if (it == page_table_.end()) {
+    return false;  // Page not in pool
+  }
 
-    frame_id_t frame_id = page_table_[page_id];
+  frame_id_t frame_id = it->second;
+
+  // Only write if dirty (optimization: avoid unnecessary I/O)
+  if (pages_[frame_id].is_dirty_) {
     disk_manager_->WritePage(page_id, pages_[frame_id].data());
-    pages_[frame_id].is_dirty_ = false;
-    return true;
+    pages_[frame_id].is_dirty_ = false;  // Now clean
+  }
+
+  return true;
 }
+
+// ============================================================================
+// FlushAllPages: Write All Dirty Pages to Disk
+// ============================================================================
 
 void BufferPoolManager::FlushAllPages() {
-    // ... (This function is unchanged)
-    std::lock_guard<std::mutex> lock(latch_);
-    for (auto const& [page_id, frame_id] : page_table_) {
-        if (pages_[frame_id].is_dirty_) {
-            disk_manager_->WritePage(page_id, pages_[frame_id].data());
-            pages_[frame_id].is_dirty_ = false;
-        }
+  std::lock_guard<std::mutex> lock(latch_);
+
+  // Iterate through all pages currently in the pool
+  for (const auto& [page_id, frame_id] : page_table_) {
+    if (pages_[frame_id].is_dirty_) {
+      disk_manager_->WritePage(page_id, pages_[frame_id].data());
+      pages_[frame_id].is_dirty_ = false;
     }
+  }
 }
 
-bool BufferPoolManager::find_victim_frame(frame_id_t* frame_id) {
-    // ... (Ensure the WritePage call we removed earlier is still gone)
-    for (auto it = replacer_.rbegin(); it != replacer_.rend(); ++it) {
-        frame_id_t current_frame_id = *it;
-        if (pages_[current_frame_id].pin_count_ == 0) {
-            // Found a victim.
-            *frame_id = current_frame_id;
-            
-            // Remove from page table and replacer.
-            page_table_.erase(pages_[current_frame_id].page_id());
-            replacer_.erase(std::next(it).base()); // Erase using forward iterator
-            
-            return true;
-        }
+// ============================================================================
+// FindVictimFrame: LRU Eviction (Phase A - Simple)
+// ============================================================================
+
+bool BufferPoolManager::FindVictimFrame(frame_id_t* frame_id) {
+  // Walk LRU list from back (least recently used) to front (most recently used)
+  for (auto it = lru_list_.rbegin(); it != lru_list_.rend(); ++it) {
+    frame_id_t candidate = *it;
+
+    // Can only evict unpinned pages
+    if (pages_[candidate].GetPinCount() == 0) {
+      *frame_id = candidate;
+
+      // -----------------------------------------------------------------------
+      // Phase A: Simple eviction (NO write-before-evict)
+      // -----------------------------------------------------------------------
+      // TODO Phase B: Add write-before-evict for durability
+      // if (pages_[candidate].IsDirty()) {
+      //   disk_manager_->WritePage(pages_[candidate].page_id(),
+      //                            pages_[candidate].data());
+      //   pages_[candidate].is_dirty_ = false;
+      // }
+
+      // Remove from metadata structures
+      page_table_.erase(pages_[candidate].page_id());
+
+      // Convert reverse_iterator to forward_iterator for erase
+      // std::next(it).base() gives the forward iterator
+      lru_list_.erase(std::next(it).base());
+
+      return true;
     }
-    return false; // No victim found.
+  }
+
+  // All pages are pinned - cannot evict!
+  return false;
 }
 
-void BufferPoolManager::update_replacer(frame_id_t frame_id) {
-    // ... (This function is unchanged)
-    replacer_.remove(frame_id);
-    replacer_.push_front(frame_id);
+// ============================================================================
+// UpdateLRU: Move Frame to Front (Most Recently Used)
+// ============================================================================
+
+void BufferPoolManager::UpdateLRU(frame_id_t frame_id) {
+  // Remove from current position in list (O(n) operation)
+  lru_list_.remove(frame_id);
+
+  // Add to front (most recently used)
+  lru_list_.push_front(frame_id);
 }
 
-} // namespace db
+}  // namespace db

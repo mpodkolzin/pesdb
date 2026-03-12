@@ -1,0 +1,41 @@
+#!/bin/bash
+
+cd "$(dirname "${BASH_SOURCE[0]}")" || exit
+
+# Find the right python version. If 3.11 exists, use that (as to fix TC issues with old branches).
+python=python3
+if which python3.11 > /dev/null 2>&1; then
+  python=python3.11
+fi
+
+if $python -c 'import sys; exit(0) if sys.version_info < (3, 11) else exit(1)'; then
+  echo "Python >=3.11 is required, cannot continue"
+  exit
+fi
+
+if [ ! -d venv ] || [ requirements.txt -nt venv/bin/activate ] || [ requirements.txt -ot venv/bin/activate ]; then
+  echo "No virtual-env available yet or the virtual-env is out of date; (re)creating venv"
+  if [ -d venv ]; then
+    rm -rf venv
+  fi
+
+  # Setup the venv.
+  $python -m venv venv
+
+  source venv/bin/activate
+  pip install -r requirements.txt
+
+  # Make change time exactly the same so we don't run again.
+  touch -r requirements.txt venv/bin/activate
+else
+  source venv/bin/activate
+fi
+
+# Commit hooks and various things need to run in the root directory.
+cd ..
+
+# Temp: auto-clean the untracked folder and files we no longer use.
+# This can be removed after some time (i.e. when folder is gone in everyone's local env).
+rm -rf tools/git-patch-tool
+
+python3 runner/runner.py "$@"

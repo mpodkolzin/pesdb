@@ -1,0 +1,19 @@
+# Override configuration for CI
+
+operating-system: {{ operating_system }}
+host-database: {{ host_database }}
+
+runner:
+    dir: {{ runner_dir }}
+
+building:
+    type: {{ build_type }}
+    clean: {{ clean }}
+    use-valgrind: {{ use_valgrind }}
+    postfix: {{ postfix }}
+    package-kind: {{ package_kind }}
+
+snc-provision:
+    url: {{ snc_provision_url }}
+    clone_dir: {{ snc_provision_clone_dir }}
+    sync: True

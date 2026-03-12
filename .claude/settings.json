@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__development",
+      "mcp__code-search"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

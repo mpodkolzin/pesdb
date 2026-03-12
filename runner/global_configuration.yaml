@@ -1,0 +1,60 @@
+# Define default setting for runner tasks.
+# Main purpose of this file is to produce nice default experience running locally.
+
+# most important settings; keep them short to they're easy to modify from the commandline
+operating-system: rhel_8
+host-database: psql_15
+
+building:
+    product-version: "34.0"
+    pg-cve-level: 15 # Minor PG version up to which we have cherry-picked all the CVE fixes.
+    parallelism: 16
+    test-parallelism: 16
+    type: RelWithAssert
+    clean: nothing
+    clang-tidy: False # Run clang-tidy with the build
+    auto-apply-clang-format: False
+    auto-apply-junit-format: False
+    postfix:
+    teamcity: False
+    metadata: False
+    use-valgrind: False
+    package-kind: database # database, modlog_reader
+    package-buildid: 1
+
+docker:
+    paths: {}
+    repository: registry-snapshots.devsnc.com/devsnc/
+    image-version: 902 # Ref: https://code.devsnc.com/dev/tembo/wiki/Runner-image-numbers
+    exports: {}
+
+snc-provision:
+    url: https://code.devsnc.com/dev/snc-provision
+    # tools.ensure_snc_provision_branch() appends `-el7` to the branch name when testing centos7.
+    branch: scratch/postgres-prepare-for-34.0
+    sync: False # Sync the branch with remote repository for each run
+    clone_dir: # Use runner.dir if leave empty
+
+mac:
+    force-reinstall: False
+    sys_root: /Library/Developer/CommandLineTools/SDKs/MacOSX14.sdk
+    install_paths: [/opt/homebrew]
+    pkg_config_paths:
+        [/opt/homebrew/lib/pkgconfig, /opt/homebrew/opt/icu4c/lib/pkgconfig]
+
+runner:
+    dir: /tmp/tembo-build
+    # Any of CRITICAL, ERROR, WARNING, INFO, DEBUG.
+    log-level: INFO
+    exception-traces: False
+    # it's also possible to override environment variables here; see example below that extends stack size to 256.
+    # NOTE: 256 is the max asan stack size (see define of kStackTraceMax)
+    #environment:
+    #    ASAN_OPTIONS: suppressions=/swarm/asan.supp,print_suppressions=0,verbose=1,fast_unwind_on_malloc=0,malloc_context_size=256
+
+credential:
+    NEXUS_USER:
+    NEXUS_PASSWD:
+
+# set to a different name if you want multiple runners at the same time
+mcp_container: mcp_runner

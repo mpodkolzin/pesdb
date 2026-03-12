@@ -1,94 +1,144 @@
 #include "columnar_db/storage/disk_manager.h"
+
+#include <cstring>
 #include <stdexcept>
-#include <sys/stat.h>
-#include <vector>
 
 namespace db {
 
-DiskManager::DiskManager(const std::string& db_file) : file_name_(std::move(db_file)) {
-    file_stream_.open(file_name_, std::ios::in | std::ios::out | std::ios::binary);
+// ============================================================================
+// Constructor: Open or Create Database File
+// ============================================================================
 
-    bool is_new_db = false;
+DiskManager::DiskManager(const std::string& db_file)
+    : file_name_(db_file), num_pages_(0) {
+
+  // Try to open existing file
+  file_stream_.open(file_name_,
+                    std::ios::in | std::ios::out | std::ios::binary);
+
+  if (!file_stream_.is_open()) {
+    // File doesn't exist, create it
+    file_stream_.open(file_name_,
+                      std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+
     if (!file_stream_.is_open()) {
-        // File doesn't exist, create it with 'trunc'
-        file_stream_.open(file_name_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-        if (!file_stream_.is_open()) {
-            throw std::runtime_error("Cannot create or open database file: " + file_name_);
-        }
-        is_new_db = true;
+      throw std::runtime_error("Cannot create database file: " + file_name_);
     }
+  }
 
-    // Manually seek to the end to get the size
-    file_stream_.seekg(0, std::ios::end);
-    off_t file_size = file_stream_.tellg();
-    next_page_id_ = file_size / PAGE_SIZE;
+  // Determine file size and calculate num_pages
+  file_stream_.seekg(0, std::ios::end);
+  std::streampos file_size = file_stream_.tellg();
 
+  if (file_size < 0) {
+    throw std::runtime_error("Failed to get file size: " + file_name_);
+  }
 
-    if (is_new_db || file_size == 0) {
-        allocate_and_zero_out_page(0); // Allocate space for Page 0
-        next_page_id_ = 1; 
-    }
+  num_pages_ = static_cast<size_t>(file_size) / PAGE_SIZE;
 }
+
+// ============================================================================
+// Destructor: Close File Handle
+// ============================================================================
 
 DiskManager::~DiskManager() {
-    if (file_stream_.is_open()) {
-        file_stream_.close();
-    }
+  if (file_stream_.is_open()) {
+    file_stream_.close();
+  }
 }
 
-void DiskManager::allocate_and_zero_out_page(page_id_t page_id) {
-    // Create a buffer of zeros. Using a static vector is efficient.
-    static const std::vector<char> zero_buffer(PAGE_SIZE, 0);
-    
-    // Seek to the position of the new page and write zeros.
-    // This will extend the file to the required size.
-    file_stream_.seekp(static_cast<std::streampos>(page_id) * PAGE_SIZE);
-    file_stream_.write(zero_buffer.data(), PAGE_SIZE);
-    
-    // Ensure the write is flushed to disk.
-    file_stream_.flush();
+// ============================================================================
+// ReadPage: Seek to Page and Read
+// ============================================================================
+
+void DiskManager::ReadPage(page_id_t page_id, char* data) {
+  // Validate page_id (must be within existing pages)
+  if (page_id < 0 || static_cast<size_t>(page_id) >= num_pages_) {
+    throw std::out_of_range("ReadPage: Invalid page_id " +
+                            std::to_string(page_id) +
+                            " (num_pages=" + std::to_string(num_pages_) + ")");
+  }
+
+  // Calculate offset: THE KEY FORMULA!
+  size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
+
+  // Clear any error flags before seeking
+  file_stream_.clear();
+
+  // Seek to page position
+  file_stream_.seekg(offset, std::ios::beg);
+  if (file_stream_.fail()) {
+    throw std::runtime_error("Failed to seek to page " + std::to_string(page_id));
+  }
+
+  // Read page data
+  file_stream_.read(data, PAGE_SIZE);
+  if (file_stream_.fail()) {
+    throw std::runtime_error("Failed to read page " + std::to_string(page_id));
+  }
+
+  // Verify we read full page
+  std::streamsize bytes_read = file_stream_.gcount();
+  if (bytes_read != PAGE_SIZE) {
+    throw std::runtime_error("Partial read: expected " + std::to_string(PAGE_SIZE) +
+                            " bytes, got " + std::to_string(bytes_read));
+  }
 }
 
-bool DiskManager::ReadPage(page_id_t page_id, char* page_data) {
-    std::lock_guard<std::mutex> lock(latch_);
-    
-    // Clear any previous error states before seeking
-    file_stream_.clear();
-    
-    std::streampos offset = static_cast<std::streampos>(page_id) * PAGE_SIZE;
-    file_stream_.seekg(offset);
+// ============================================================================
+// WritePage: Seek to Page and Write
+// ============================================================================
 
-    // Check if the seek was successful
-    if (file_stream_.fail()) {
-         // This might happen if the page is beyond the file size.
-         // In a robust system, you'd handle this more gracefully.
-         // For now, we'll just return, leaving page_data as zeros.
-         return false;
-    }
+void DiskManager::WritePage(page_id_t page_id, const char* data) {
+  // Validate page_id (can write to existing page or extend file by one)
+  if (page_id < 0 || static_cast<size_t>(page_id) > num_pages_) {
+    throw std::out_of_range("WritePage: Invalid page_id " +
+                            std::to_string(page_id) +
+                            " (num_pages=" + std::to_string(num_pages_) + ")");
+  }
 
-    file_stream_.read(page_data, PAGE_SIZE);
-    // No need to check gcount(), if it's less than PAGE_SIZE, that's okay,
-    // the rest of the buffer will be zeros from when the page was created.
-    return true;
+  // Calculate offset
+  size_t offset = static_cast<size_t>(page_id) * PAGE_SIZE;
+
+  // Clear error flags
+  file_stream_.clear();
+
+  // Seek to page position
+  file_stream_.seekp(offset, std::ios::beg);
+  if (file_stream_.fail()) {
+    throw std::runtime_error("Failed to seek to page " + std::to_string(page_id));
+  }
+
+  // Write page data
+  file_stream_.write(data, PAGE_SIZE);
+  if (file_stream_.fail()) {
+    throw std::runtime_error("Failed to write page " + std::to_string(page_id));
+  }
+
+  // Flush to ensure durability (data written to OS, not just buffered)
+  file_stream_.flush();
+
+  // Update num_pages if we extended the file
+  if (static_cast<size_t>(page_id) >= num_pages_) {
+    num_pages_ = page_id + 1;
+  }
 }
 
-void DiskManager::WritePage(page_id_t page_id, const char* page_data) {
-    std::lock_guard<std::mutex> lock(latch_);
-    
-    // Clear any previous error states before seeking
-    file_stream_.clear();
-
-    std::streampos offset = static_cast<std::streampos>(page_id) * PAGE_SIZE;
-    file_stream_.seekp(offset);
-    file_stream_.write(page_data, PAGE_SIZE);
-    file_stream_.flush();
-}
+// ============================================================================
+// AllocatePage: Reserve Next Page ID (EAGER ALLOCATION)
+// ============================================================================
 
 page_id_t DiskManager::AllocatePage() {
-    std::lock_guard<std::mutex> lock(latch_);
-    page_id_t new_page_id = next_page_id_++;
-    allocate_and_zero_out_page(new_page_id);
-    return new_page_id;
+  // Next page ID is current count (append-only allocation)
+  page_id_t new_page_id = static_cast<page_id_t>(num_pages_);
+
+  // EAGER ALLOCATION: Zero-initialize page immediately
+  // This ensures the allocated page is always readable
+  char zeros[PAGE_SIZE];
+  std::memset(zeros, 0, PAGE_SIZE);
+  WritePage(new_page_id, zeros);  // This updates num_pages_
+
+  return new_page_id;
 }
 
-} // namespace db
+}  // namespace db

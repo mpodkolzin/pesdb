@@ -39,3 +39,6 @@ target_link_libraries(columnar_db_deps INTERFACE
 # --- Subdirectories ---
 # Add the source directory which contains all our libraries and the executable
 add_subdirectory(src)
+
+# Add tests
+add_subdirectory(tests)
