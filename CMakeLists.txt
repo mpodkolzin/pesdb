@@ -40,5 +40,7 @@ target_link_libraries(columnar_db_deps INTERFACE
 # Add the source directory which contains all our libraries and the executable
 add_subdirectory(src)
 
-# Add tests
+# Enable testing at the top level so `ctest` from the build root finds
+# tests registered by gtest_discover_tests in subdirectories.
+enable_testing()
 add_subdirectory(tests)
