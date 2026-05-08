@@ -17,3 +17,4 @@ enable_testing()
 
 # Add unit test subdirectories
 add_subdirectory(unit)
+add_subdirectory(integration)
