@@ -2,6 +2,40 @@
 
 This document captures brainstorming sessions and design decisions made during the learning journey.
 
+**See also:** [../LEARNING_PLAN.md](../LEARNING_PLAN.md) for overall project roadmap and phases.
+
+---
+
+## Current Status (2026-05-12)
+
+**Phase**: 1 - Storage Foundation
+**Progress**: ~80% complete
+
+### What's Working
+- Page abstraction (in-memory representation)
+- Disk Manager (file I/O, page allocation)
+- Buffer Pool Manager (mostly working)
+- Basic tests passing (34/35)
+
+### Recently Fixed
+- ✅ BufferPool LRU eviction bug (2026-05-12)
+  - **Problem**: Evicted dirty pages lost data (test expecting "Page 0", got "")
+  - **Root cause**: Write-before-evict code was commented out in FindVictimFrame()
+  - **Fix**: Enabled dirty page flush before eviction (lines 235-239)
+  - **Learning**: This is THE critical durability pattern - evicting dirty pages without flushing = data loss!
+  - **Tests**: All 35 storage tests now passing (was 34/35)
+
+### What's Next
+1. ✅ ~~Fix eviction bug~~ (DONE - write-before-evict enabled)
+2. Wire WAL into build system
+   - Add `add_subdirectory(wal)` to src/CMakeLists.txt
+   - Create proper src/wal/CMakeLists.txt
+3. Add WAL unit tests
+   - LogRecord serialization round-trip
+   - LogManager append + read
+4. Test WAL integration with BufferPool
+5. Move to Phase 2 (Recovery implementation)
+
 ---
 
 ## Session 1: Page Class Design (2026-01-08)
@@ -842,3 +876,279 @@ Walk lru_list_ from back: frame 2 (Page 20) if pin_count = 0
 ---
 
 **Status:** Design exploration complete. Ready for Phase A formal design doc and implementation.
+
+## Session 3: Write-Ahead Log (WAL) Design (2026-05-12)
+
+### Problem Statement
+
+Need to ensure **durability** — changes survive crashes. Without WAL, if the process crashes after modifying an in-memory page but before flushing it to disk, the change is lost.
+
+**Requirements:**
+- Log changes BEFORE applying them to pages
+- Survive process crashes
+- Support recovery (replay log on startup)
+- Simple, correct implementation first
+
+**Learning Goals:**
+- Write-ahead logging protocol
+- Durability guarantees (fsync)
+- Logical vs physical logging
+- Recovery replay process
+- Log serialization format
+
+---
+
+### Ideas Explored
+
+#### Idea 1: Physical WAL (Page-Level)
+
+**Approach:**
+```cpp
+struct LogRecord {
+  page_id_t page_id;
+  uint32_t offset;
+  uint32_t length;
+  char data[length];  // Bytes that changed
+};
+```
+
+**Learning Value:**
+- Simple recovery: just copy bytes back to page
+- Matches PostgreSQL approach
+- Easy to understand
+
+**Trade-offs:**
+- Large log files (stores entire page deltas)
+- Tightly coupled to page format
+- No compression opportunities
+
+---
+
+#### Idea 2: Logical WAL (Operation-Level) — CHOSEN
+
+**Approach:**
+```cpp
+struct LogRecord {
+  RecordType type;  // INSERT, UPDATE, DELETE
+  std::string table_name;
+  std::vector<int64_t> tuple;  // The data
+};
+```
+
+**Learning Value:**
+- Smaller logs (store operations, not bytes)
+- Easier to read/debug (human-readable operations)
+- Better for learning (understand what changed, not just bytes)
+
+**Trade-offs:**
+- Recovery is more complex (must re-execute operations)
+- Requires working catalog/executor during recovery
+- Must be idempotent (replaying twice should be safe)
+
+**Why chosen for Phase 1:**
+- Teaching value: understand operations, not just storage
+- Smaller logs = easier to debug
+- Matches what SQL databases conceptually do
+
+---
+
+#### Idea 3: Durability Guarantee — fsync Issue
+
+**The Problem:**
+```cpp
+wal_file_ << data;
+wal_file_.flush();  // Only flushes to OS cache, not disk!
+```
+
+C++ `fstream::flush()` does NOT guarantee disk durability. OS can cache the write.
+
+**Options:**
+
+**A. Use raw file descriptors (POSIX):**
+```cpp
+int fd = open("mydb.wal", O_WRONLY | O_APPEND | O_CREAT);
+write(fd, data, size);
+fsync(fd);  // TRUE durability
+```
+
+**B. Document the limitation (Phase 1):**
+- Note that current implementation is "best-effort"
+- True durability requires fsync (add later)
+- Good enough for learning (process crashes are rare in dev)
+
+**Decision for Phase 1:** Document the limitation, use `flush()`.
+- Keeps code simple (std::fstream is easier than raw fd)
+- Add real fsync in Phase 2 when we care about real durability
+- Focus on understanding WAL protocol first
+
+---
+
+### Design Decisions
+
+#### 1. Log Record Format
+
+**Chosen:**
+```
+[uint32_t size][RecordType type][variable data]
+```
+
+**Why:**
+- Size prefix allows reading records sequentially
+- Type byte enables multiple record types
+- Variable data = flexible (INSERT vs UPDATE have different payloads)
+
+**Alternative (fixed-size) rejected:**
+- Wastes space for variable-length data
+- Harder to extend with new record types
+
+---
+
+#### 2. Append-Only Log File
+
+**Chosen:** Single `.wal` file, append-only writes
+
+**Why:**
+- Simple: no log rotation in Phase 1
+- Append-only = sequential I/O (fast on HDD/SSD)
+- Easy recovery: read file start to end
+
+**Future (Phase 3):** Add log truncation after checkpoints
+
+---
+
+#### 3. Synchronous Append (No Buffering)
+
+**Chosen:** `flush()` after every `AppendLogRecord()`
+
+**Why:**
+- Simplest correct implementation
+- Each operation is immediately durable
+- No group commit complexity
+
+**Trade-off:**
+- Poor throughput (one fsync per write = slow)
+- Fine for learning, unacceptable for production
+- Can add group commit later (Phase 4)
+
+---
+
+#### 4. No LSN/Transaction IDs (Phase 1)
+
+**Deferred to Phase 2:**
+- Log Sequence Numbers (LSNs) for ordering
+- Transaction IDs for multi-operation atomicity
+- BEGIN/COMMIT/ABORT records
+
+**Phase 1 focuses on:**
+- Single-operation logging
+- Basic serialization
+- Recovery replay mechanics
+
+---
+
+### What's Implemented (But Not Tested)
+
+**Files exist:**
+```
+include/columnar_db/wal/
+  log_record.h      -> LogRecord serialization
+  log_manager.h     -> LogManager API
+
+src/wal/
+  log_record.cpp    -> (not created yet)
+  log_manager.cpp   -> (not created yet)
+  CMakeLists.txt    -> (not wired into build)
+```
+
+**API exists:**
+```cpp
+class LogManager {
+  void AppendLogRecord(const LogRecord& record);
+  std::vector<LogRecord> ReadAllLogRecords();
+  void ClearLog();
+};
+```
+
+**What's missing:**
+- Not wired into build (src/CMakeLists.txt doesn't include wal/)
+- No unit tests
+- Serialization logic untested
+- Recovery replay not implemented
+
+---
+
+### Next Steps — Closing Phase 1
+
+**To call WAL "Phase 1 complete":**
+
+1. **Build integration** (30 mins)
+   - Add `add_subdirectory(wal)` to src/CMakeLists.txt
+   - Create src/wal/CMakeLists.txt properly
+   - Verify library builds
+
+2. **Unit tests** (2 hours)
+   - Test LogRecord serialization round-trip
+   - Test LogManager append + read
+   - Test multiple records
+   - Test empty log
+   - Test clear and reuse
+
+3. **Fix known issues** (1 hour)
+   - Document flush() limitation
+   - Fix Deserialize contract (size-prefix handling)
+   - Handle seekp/seekg with std::ios::app mode
+
+4. **Documentation** (30 mins)
+   - Update this exploration log
+   - Mark Phase 1 complete in LEARNING_PLAN.md
+   - Note what worked, what didn't
+
+**After Phase 1:**
+- Move to Phase 2: Add LSNs, transactions, REDO logic
+- Integrate WAL with BufferPoolManager (flush-on-commit)
+- Build simple recovery test (crash simulator)
+
+---
+
+### Testing Strategy
+
+**Unit tests for LogRecord:**
+1. Serialize INSERT record, deserialize, verify match
+2. Multiple record types (when added)
+3. Edge cases: empty tuple, max-size tuple
+
+**Unit tests for LogManager:**
+1. Append one record, read back
+2. Append multiple records, read all in order
+3. Empty log -> ReadAllLogRecords returns empty vector
+4. ClearLog then append -> starts fresh
+5. Reopen log file, records still there (persistence)
+
+**Integration test (Phase 2):**
+1. Modify page, log the change, flush WAL
+2. Crash simulator (kill process)
+3. Restart, replay log, verify change reappeared
+
+---
+
+### References
+
+**Industry implementations:**
+- **PostgreSQL**: src/backend/access/transam/xlog.c (XLOG = WAL)
+- **SQLite**: WAL mode (wal.c)
+- **MySQL InnoDB**: redo log (log0log.cc)
+
+**Papers:**
+- ARIES recovery algorithm (comprehensive WAL + recovery)
+- "The Design and Implementation of a Log-Structured File System" (LFS paper)
+
+**Concepts:**
+- Write-ahead logging: log before modifying data
+- Durability: fsync guarantees disk write
+- Idempotency: safe to replay log records multiple times
+- Logical vs physical: operations vs bytes
+
+---
+
+**Status:** Design drafted, code exists but untested. Ready to wire into build and add tests.
+
