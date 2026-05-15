@@ -67,10 +67,12 @@
 - [x] Page abstraction (in-memory page representation)
 - [x] Disk Manager (page allocation, read/write)
 - [x] Buffer Pool Manager (caching layer)
+- [x] BufferPool LRU eviction (all tests passing)
+- [x] WAL Phase 1 (LogManager with append/read/clear, all tests passing)
+- [x] Storage architecture documentation (doc/architecture/storage-layer.md)
 
-### In Progress
-- [ ] Fix BufferPool LRU eviction bug (SimpleLRUEviction test failing)
-- [ ] Complete WAL (Write-Ahead Logging) design
+### Ready for Phase 2
+Phase 1 is complete - all storage foundation components working and tested.
 
 ### Learning Outcomes
 - Memory layout and cache-friendly data structures
@@ -88,15 +90,29 @@ include/columnar_db/storage/
   disk_manager.h            -> Raw file I/O layer
   buffer_pool_manager.h     -> Caching layer
 
+include/columnar_db/wal/
+  log_record.h              -> WAL record format
+  log_manager.h             -> Write-ahead log manager
+
 src/storage/
   disk_manager.cpp          -> Implemented
-  buffer_pool_manager.cpp   -> Implemented (has bug)
+  buffer_pool_manager.cpp   -> Implemented
+
+src/wal/
+  log_record.cpp            -> Implemented
+  log_manager.cpp           -> Implemented
+
+doc/architecture/
+  storage-layer.md          -> Overall architecture with diagrams
 
 doc/design/storage/
   page.md                   -> Page design
   disk-manager.md           -> Disk manager design
   buffer_pool_manager.md    -> Buffer pool design
   file-layout.md            -> On-disk format
+
+doc/design/wal/
+  log_manager.md            -> WAL Phase 1 design
 ```
 
 ---

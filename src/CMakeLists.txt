@@ -1,6 +1,7 @@
 # Add source subdirectories
 add_subdirectory(storage)
 add_subdirectory(wal)
+add_subdirectory(ingest)
 
 # Future subdirectories (uncomment as we implement them)
 # add_subdirectory(recovery)   # Phase 4: recovery driver (replays WAL)
