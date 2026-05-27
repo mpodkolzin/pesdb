@@ -1,8 +1,8 @@
 # LogManager / WAL Design Document — Phase 1
 
 **Component:** Recovery Foundation — Write-Ahead Log (Phase 1: Logical, Single-Threaded Recovery)
-**Status:** Code drafted (untracked in `src/wal/`, `include/columnar_db/wal/`); not yet wired into the build, no tests.
-**This doc covers:** Closing out Phase 1 — wire WAL into the build, add unit tests, plug the small correctness gaps. Keeps the existing API mostly intact; defers LSNs/txns to Phase 2.
+**Status:** ✅ **Phase 1 complete** — built, tested, wired into the default build. Not yet connected to a write path.
+**This doc covers:** the Phase 1 design (still accurate as a historical record) and a **Deferred Work** punch list of everything *not* in Phase 1 so we can pick it up later. New work building on this should live in its own design doc (e.g. `wal_write_path_wiring.md`).
 
 ---
 
@@ -24,18 +24,20 @@ The contract: **the log record for a change is durable on disk before the change
 
 ---
 
-## Where We Are Now
+## Where We Are Now (Phase 1 Closeout)
 
-Drafted under `src/wal/` and `include/columnar_db/wal/`:
+Live under `src/wal/`, `include/columnar_db/wal/`, and `tests/unit/wal/`:
 
-- **`LogRecord`** — logical, length-prefixed serialization. Today it carries one type, `INSERT_TUPLE`, with a table name and a `vector<int64_t>` tuple.
-- **`LogManager`** — opens an `fstream` in read+write+append+binary mode, holds a mutex around append/read/clear, flushes after every write.
+- **`LogRecord`** — logical, length-prefixed serialization. Carries one type today, `INSERT_TUPLE`, with a `std::string` table name and a `std::vector<int64_t>` tuple. `LogRecordType` underlying type is pinned to `uint8_t` so the on-disk byte width is stable across compilers. `Deserialize(buffer, out)` takes a pointer to a complete record (size header included) and parses linearly.
+- **`LogManager`** — opens an `fstream` in `in | out | app | binary` (with a create-then-reopen fallback for first run). `AppendLogRecord` serializes into a temp buffer, `write()`s, and `flush()`es to the OS page cache. `ReadAllLogRecords` rewinds, frame-decodes records, and treats both clean EOF and any short read (torn header *or* torn body, *or* a `record_size < sizeof(uint32_t)` corrupt header) as end-of-log. `ClearLog` close→`trunc`→reopen-in-append. One `std::mutex latch_` across all three public methods. Copy/move all deleted.
+- **Build** — `src/CMakeLists.txt` does `add_subdirectory(wal)`; the library is built by default.
+- **Tests** — `tests/unit/wal/{log_record_test.cpp, log_manager_test.cpp}` cover round-trip (full / empty-tuple / empty-name / large-tuple), `GetSize()` accuracy, first-4-bytes-are-size, append+read-on-same-instance, durability across destructor + reopen, torn-body, torn-header, and `ClearLog`-then-append-still-works.
 
-What's missing to call Phase 1 done:
+What's *not* in Phase 1 (intentional — see [Deferred Work](#deferred-work--future-phases)):
 
-1. `src/wal/CMakeLists.txt` exists but is not pulled in by `src/CMakeLists.txt` — the library is not built.
-2. No unit tests exist for `LogRecord` or `LogManager`.
-3. A few small correctness/clarity issues (see *Known Issues* below) — none of them are deal-breakers, but they should be addressed before WAL is depended on.
+- No `fsync(2)` — durability is process-crash safe only, not kernel/power-crash safe.
+- No LSN, no transaction records, no recovery driver.
+- WAL is not connected to any write path — nothing currently calls `AppendLogRecord`.
 
 ---
 
@@ -199,16 +201,16 @@ No public API changes are planned for Phase 1 — the work is entirely internal 
 
 ---
 
-## Known Issues to Fix in This Phase
+## Phase 1 Outcomes (Known Issues — Status)
 
-These are small and bounded; calling them out so they don't slip:
+The Phase 1 punch list, with what actually shipped:
 
-1. **Build wiring.** `src/CMakeLists.txt` doesn't `add_subdirectory(wal)`. Trivial fix.
-2. **`Deserialize` data flow.** Today the caller copies the size header into the body buffer's first 4 bytes by hand; cleaner to make the function take a pointer to a full record buffer (size header included) and parse linearly. Same wire format, less surprise.
-3. **`flush()` ≠ `fsync()`.** Document explicitly in the header that durability is best-effort under `std::fstream`. Don't claim more than we deliver.
-4. **`ReadAllLogRecords` + corrupt tail.** Current behavior (`break` on partial read) is correct but undocumented. Add a comment and a test that proves it.
-5. **`sizeof(LogRecordType)` in the wire format.** We're serializing the enum's underlying type (implementation-defined width). Either pin the underlying type (`enum class LogRecordType : uint8_t`) or serialize as an explicit `uint8_t` cast. Pin to `uint8_t` — small, portable, and makes the wire format stable across compilers.
-6. **`main.cpp` is currently broken** against the new tree (refers to deleted `catalog.h`, `engine/query_executor.h`, and `BUFFER_POOL_SIZE` which doesn't exist). This is *not* a WAL bug, but the WAL CMake change will surface it the moment we try to build the executable. Out of scope for this doc — to be tracked separately.
+1. ✅ **Build wiring.** `src/CMakeLists.txt:3` now does `add_subdirectory(wal)`; the `wal` library is part of the default build.
+2. ✅ **`Deserialize` data flow.** `Deserialize(buffer, out)` takes a pointer to a complete record (size header included) and parses linearly. The caller-side copy-the-header-into-the-body trick is gone.
+3. ✅ **`flush()` ≠ `fsync()`.** Documented in the `LogManager` class header (`include/columnar_db/wal/log_manager.h`) and inline in `AppendLogRecord` — explicitly states that we survive a process crash but not a kernel/power crash, and points to Phase 3 for the fix.
+4. ✅ **`ReadAllLogRecords` + corrupt tail.** Loop comments explain torn-header and torn-body as end-of-log, plus a guard for `record_size < sizeof(uint32_t)` (corrupt header). Tests `TornBodyTreatedAsEof` and `TornHeaderTreatedAsEof` lock the behavior in.
+5. ✅ **`LogRecordType` underlying type.** Pinned to `uint8_t` (`enum class LogRecordType : uint8_t`). On-disk type byte is stable.
+6. ⚠️ **`main.cpp` is still broken** against the new tree (uses deleted `catalog.h`, `engine/query_executor.h`, `BUFFER_POOL_SIZE`). Not a WAL bug; tracked under [Deferred Work](#deferred-work--future-phases) as a prerequisite for the write-path wiring.
 
 ---
 
@@ -380,17 +382,17 @@ tests/unit/CMakeLists.txt         # ADD: add_subdirectory(wal)
 
 ## Implementation Plan
 
-1. ✅ Design exploration / context (`doc/design_exploration.md` — WAL is a new section, this doc replaces that need).
+1. ✅ Design exploration / context (`doc/design_exploration.md` Session 3).
 2. ✅ Write formal design doc (this file).
-3. → Wire `wal` into the build: `add_subdirectory(wal)` in `src/CMakeLists.txt`. Verify it compiles.
-4. → Apply the *Known Issues* fixes that don't change the API: pin `LogRecordType` underlying type, restructure `Deserialize` to take a full-record buffer, document `flush` vs `fsync` in the header, add a comment on the torn-tail behavior in `ReadAllLogRecords`.
-5. → Add `tests/unit/wal/CMakeLists.txt` and the test files above. Wire into `tests/unit/CMakeLists.txt`.
-6. → Build and run: all storage tests still pass, all wal tests pass.
-7. → Track separately (out of scope here): fix `src/main/main.cpp` so the executable builds again, or shelve it until the catalog exists.
+3. ✅ Wire `wal` into the build (`src/CMakeLists.txt:3`).
+4. ✅ Apply the Known Issues fixes (pinned `LogRecordType` underlying type, restructured `Deserialize`, documented `flush` vs `fsync` in the header, commented torn-tail behavior in `ReadAllLogRecords`).
+5. ✅ Add `tests/unit/wal/` with `log_record_test.cpp` and `log_manager_test.cpp`, wired into `tests/unit/CMakeLists.txt`.
+6. ✅ Build and run: storage + wal tests all pass.
+7. ⚠️ Tracked separately: `src/main/main.cpp` is still broken (catalog/engine deps removed). Carried as a prerequisite under Deferred Work; will be resolved as part of write-path wiring.
 
 ---
 
-## Success Criteria — Phase 1
+## Success Criteria — Phase 1 (all met)
 
 - ✅ `cmake --build` produces both `columnar_db_storage` and `wal` libraries.
 - ✅ `ctest` (or running `storage_tests` and `wal_tests` directly) passes all tests.
@@ -401,27 +403,60 @@ tests/unit/CMakeLists.txt         # ADD: add_subdirectory(wal)
 - ✅ `LogRecordType` has a fixed underlying type so the wire format is portable.
 
 **Known limitation carried forward:**
-- ⚠️ Durability is best-effort under `std::fstream` (no `fsync`). Acceptable for Phase 1; revisited when we need real crash safety against an OS crash (Phase 3+).
+- ⚠️ Durability is best-effort under `std::fstream` (no `fsync`). Acceptable for Phase 1; revisited under Deferred Work § Phase 3 when we need real crash safety against an OS-level crash.
 
 ---
 
-## Phase 2 Preview — LSN, Transactions, and a Recovery Driver
+## Deferred Work — Future Phases
 
-What this design intentionally leaves on the table:
+Everything that is **not in Phase 1** but is needed before WAL becomes load-bearing. Items grouped by phase, ordered roughly by dependency. Each is a future work item — pick one off the list, write a small design doc for it, implement, tick the box here.
 
-- **`lsn_t`** assigned by `LogManager` at append time (already in `types.h`, unused). Returned to the caller so they can stamp the affected page's `page_lsn` once it's modified.
-- **Transaction records:** `BEGIN_TXN(txn_id)`, `COMMIT_TXN(txn_id)`, `ABORT_TXN(txn_id)`, plus a `txn_id` field on every data record.
-- **Recovery driver:** on startup, before serving queries, replay records in LSN order and skip records whose LSN ≤ `page_lsn` (idempotency through page-LSN check).
-- **Catalog / heap:** none of the above is meaningful until there's something to insert *into*. Building a minimal `Catalog` + heap-style table in the new tree is a prerequisite for an end-to-end recovery test.
+### Phase 2 — Wiring WAL to a Write Path
 
----
+Goal: every mutation logs first, and replay-after-crash reproduces state. This is what we're brainstorming next.
 
-## Phase 3+ Preview — Production Concerns
+- [ ] **Catalog port.** Move `old/include/catalog.h` + `old/src/storage/catalog.cpp` into `include/columnar_db/storage/` + `src/storage/`, adapted to the new tree. Without it, an `INSERT_TUPLE` replay has nowhere to land. Prerequisite for everything else in Phase 2.
+- [ ] **Tuple/heap (or equivalent target).** Decide and build the smallest *thing* that an `INSERT_TUPLE` can be applied to: row-oriented heap page, or a stub columnar segment. Drives the shape of `INSERT_TUPLE` payloads.
+- [ ] **`lsn_t` allocation in `LogManager`.** Make `AppendLogRecord` return the assigned LSN. `lsn_t` is already declared in `include/columnar_db/common/types.h:37` but unused.
+- [ ] **`page_lsn` on `Page`.** Each page remembers the LSN of the last log record applied to it. Enables idempotent replay (skip records with `lsn ≤ page_lsn`).
+- [ ] **Write-ahead invariant in `BufferPoolManager`.** Before flushing a dirty page, ensure `flushed_wal_lsn ≥ page_lsn`. Concretely: WAL must be flushed up to the page's LSN before the page is allowed to leave the buffer pool. This is the *actual* "write-ahead" guarantee.
+- [ ] **Recovery driver.** New module `src/recovery/` (already commented out at `src/CMakeLists.txt:6`). First version: `Recover(LogManager&, Catalog&, BufferPoolManager&)` → `ReadAllLogRecords()` then apply each record (idempotent via page-LSN check) → `ClearLog()` after success. End-to-end test: append → destroy → recover into a fresh state → assert.
+- [ ] **Wire `AppendLogRecord` into the write path.** Once a write path exists in the new tree (likely a re-ported `QueryExecutor` or its successor), every mutating op calls `AppendLogRecord` *before* mutating the buffer pool, and stamps the page's `page_lsn` after.
+- [ ] **Fix `src/main/main.cpp`.** Currently broken (refers to deleted `catalog.h`, `engine/query_executor.h`, `BUFFER_POOL_SIZE`). Resolves itself once Catalog + a write path are back.
 
-- **Real fsync.** Move WAL off `std::fstream` and onto a raw fd; expose a `Sync()` method or fsync on every append depending on the durability mode chosen.
-- **Page-LSN tracking on `Page`.** ARIES-style "skip records that are already on the page" requires the page itself to remember the LSN of the last log record applied to it.
-- **Checkpoints + log truncation.** The WAL can't grow forever. A checkpoint flushes all dirty pages and lets us truncate the log up to that point.
-- **Log buffer + group commit.** One fsync per record is the easy thing; one fsync per *group* of records is the fast thing. Requires a small in-memory log buffer and a background flusher.
+### Phase 3 — Transactions
+
+Goal: replay can distinguish committed from uncommitted work. Requires Phase 2 done.
+
+- [ ] **Transaction record types.** Add `BEGIN_TXN`, `COMMIT_TXN`, `ABORT_TXN`, plus `UPDATE_TUPLE`, `DELETE_TUPLE`, `CREATE_TABLE` to `LogRecordType`. Bumps the wire format — either version the file or refuse to read v1 logs (fine for a learning project).
+- [ ] **`txn_id_t` on every data record.** Threaded through `LogRecord` payload.
+- [ ] **Recovery: redo committed, skip uncommitted.** Two-pass recovery: first scan to collect the set of committed txn IDs (saw `COMMIT_TXN`), second pass redoes only those records.
+- [ ] **(Optional) Undo for in-place updates.** Not needed yet — we have no in-place updates. Becomes relevant once `UPDATE_TUPLE` modifies a page in place.
+
+### Phase 4 — Real Durability
+
+Goal: survive a kernel/power crash, not just a process crash. Self-contained, no other layer involved.
+
+- [ ] **Raw fd + `fsync(2)`.** Replace `std::fstream` with `::open` / `::write` / `::fsync` (and `FlushFileBuffers` on Windows if we ever care). Expose `Sync()` explicitly or fsync per append depending on the durability mode.
+- [ ] **Document the durability contract.** "After `Append` returns, the record is on the device" — currently the header says the opposite, which is honest but should change once Phase 4 lands.
+- [ ] **Test for real durability.** Kill -9 the process, restart, assert records are still readable. Power-loss tests are out of scope; OS-crash tests via `O_DIRECT` or process kill are achievable.
+
+### Phase 5 — Performance / Production Concerns
+
+Goal: stop being a learning prototype.
+
+- [ ] **Log buffer + group commit.** In-memory ring buffer of pending records; a background flusher coalesces fsyncs. Requires a workload to measure against — premature otherwise.
+- [ ] **Checkpoints + log truncation.** The WAL grows unbounded today. A checkpoint flushes all dirty pages and lets us truncate the log up to the checkpoint's LSN.
+- [ ] **Log segmentation.** Split WAL into fixed-size segments (Postgres uses 16 MB) for retention/archival. Enabled by checkpoints.
+- [ ] **Per-record CRC32 checksums.** Today a bit-flip mid-record deserializes into garbage silently. Add a CRC at the end of each record; on read, verify and treat mismatch as torn-tail-equivalent. Bumps the wire format.
+
+### Phase 6 — Other Known Gaps
+
+Smaller items that don't fit neatly into a phase:
+
+- [ ] **Generalize tuple types.** Today `LogRecord` carries `std::vector<int64_t>` only — mirrors the BIGINT-only catalog. Generalize when the catalog grows real types (`DataType::DOUBLE`, `VARCHAR`, …).
+- [ ] **Endian-explicit serialization.** Currently we `memcpy` integers, which means the WAL is host-endian. Fine for single-host use; would break if a WAL written on x86 were read on a big-endian box. Not a real-world problem for this project, but worth a comment in `log_record.cpp`.
+- [ ] **Fine-grained locking / async writer.** One coarse `latch_` serializes Append, ReadAllLogRecords, and ClearLog. Fine until profiling shows it. Decoupling read/write contention or moving to an async writer is downstream of group commit (Phase 5).
 
 ---
 
@@ -441,4 +476,4 @@ What this design intentionally leaves on the table:
 
 ---
 
-**Ready to implement Phase 1.** Next step after sign-off: wire the build, apply the small cleanups, write the tests.
+**Phase 1 complete.** Next: brainstorm and design **Phase 2 — wiring WAL to the write path** (see [Deferred Work § Phase 2](#phase-2--wiring-wal-to-a-write-path)). New phase work should land in its own design doc rather than expanding this one further.

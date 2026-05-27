@@ -877,278 +877,431 @@ Walk lru_list_ from back: frame 2 (Page 20) if pin_count = 0
 
 **Status:** Design exploration complete. Ready for Phase A formal design doc and implementation.
 
-## Session 3: Write-Ahead Log (WAL) Design (2026-05-12)
+---
+
+## Session 3: Write-Ahead Log — Phase 1 (2026-05-01)
 
 ### Problem Statement
 
-Need to ensure **durability** — changes survive crashes. Without WAL, if the process crashes after modifying an in-memory page but before flushing it to disk, the change is lost.
+Need an **append-only Write-Ahead Log** so that, eventually, modifications can be
+replayed after a crash. Phase 1 is intentionally minimal: get the on-disk format
+and the append/read/clear lifecycle right, and defer durability and txn semantics.
 
-**Requirements:**
-- Log changes BEFORE applying them to pages
-- Survive process crashes
-- Support recovery (replay log on startup)
-- Simple, correct implementation first
+**Requirements (Phase 1):**
+- Length-prefixed, self-describing record format on disk
+- Append a record, flush to OS (process-crash survivable)
+- Read every fully-written record back from the start of the file
+- Tolerate a torn tail (partial header or partial body) — treat it as EOF
+- Truncate after a successful replay
+- Single coarse mutex; correctness over throughput
 
-**Learning Goals:**
-- Write-ahead logging protocol
-- Durability guarantees (fsync)
-- Logical vs physical logging
-- Recovery replay process
-- Log serialization format
-
----
-
-### Ideas Explored
-
-#### Idea 1: Physical WAL (Page-Level)
-
-**Approach:**
-```cpp
-struct LogRecord {
-  page_id_t page_id;
-  uint32_t offset;
-  uint32_t length;
-  char data[length];  // Bytes that changed
-};
-```
-
-**Learning Value:**
-- Simple recovery: just copy bytes back to page
-- Matches PostgreSQL approach
-- Easy to understand
-
-**Trade-offs:**
-- Large log files (stores entire page deltas)
-- Tightly coupled to page format
-- No compression opportunities
+**Explicit non-goals for Phase 1:**
+- No `fsync(2)` (kernel/power-loss safety) — deferred to Phase 3
+- No transaction boundaries (BEGIN/COMMIT/ABORT) — deferred to Phase 2
+- No replay driver — that's a separate module (`src/recovery/`, not yet wired)
+- No integration with the write path — nothing currently calls `AppendLogRecord`
 
 ---
 
-#### Idea 2: Logical WAL (Operation-Level) — CHOSEN
+### What Was Built
 
-**Approach:**
-```cpp
-struct LogRecord {
-  RecordType type;  // INSERT, UPDATE, DELETE
-  std::string table_name;
-  std::vector<int64_t> tuple;  // The data
-};
-```
+**`include/columnar_db/wal/log_record.h` + `src/wal/log_record.cpp`:**
+- `enum class LogRecordType : uint8_t { INVALID = 0, INSERT_TUPLE = 1 }`
+  - Underlying type pinned to `uint8_t` so the on-disk wire is stable across
+    compilers (default underlying type of `enum class` is implementation-defined).
+- `LogRecord(type, table_name, std::vector<int64_t> tuple)` — logical record,
+  variable size. Tuples are `int64_t` only for now (matches the BIGINT-only
+  catalog stub in `old/`).
+- Wire format (little-endian, packed):
+  ```
+  [uint32 total_size][uint8 type]
+  [uint32 name_len][name bytes]
+  [uint32 tuple_len][int64 × tuple_len]
+  ```
+  `total_size` includes its own 4 bytes — the reader uses it as the framing length.
+- `Serialize(char*)` / `static Deserialize(const char*, LogRecord&)` /
+  `GetSize()` — straight `std::memcpy`, no endian conversion (single-host for now).
 
-**Learning Value:**
-- Smaller logs (store operations, not bytes)
-- Easier to read/debug (human-readable operations)
-- Better for learning (understand what changed, not just bytes)
+**`include/columnar_db/wal/log_manager.h` + `src/wal/log_manager.cpp`:**
+- `std::fstream` opened `in | out | app | binary`, with a fallback that creates
+  the file via `out | trunc` then reopens in append mode.
+- `AppendLogRecord`: serialize into a temp buffer, `write()`, then `flush()`.
+  - **Durability caveat (documented in the header):** `flush()` pushes data into
+    the OS page cache only. Survives a process crash; does NOT survive a kernel
+    panic or power loss. Phase 3 will switch to a raw fd + `fsync`.
+- `ReadAllLogRecords`: rewind, loop reading `[size header][body]`. Both
+  `gcount() == 0` (clean EOF) and a short read (torn header or torn body) end
+  the loop — partial records are silently dropped. Also bails on
+  `record_size < sizeof(uint32_t)` (corrupt header).
+  - After reading, restores append-at-end position so the handle stays usable.
+- `ClearLog`: close, reopen `out | trunc` to truncate, reopen in append mode.
+  Intended to be called after a successful replay.
+- Single `std::mutex latch_` serializes all three public methods.
+- Copy/move all deleted (owns a file handle).
 
-**Trade-offs:**
-- Recovery is more complex (must re-execute operations)
-- Requires working catalog/executor during recovery
-- Must be idempotent (replaying twice should be safe)
-
-**Why chosen for Phase 1:**
-- Teaching value: understand operations, not just storage
-- Smaller logs = easier to debug
-- Matches what SQL databases conceptually do
-
----
-
-#### Idea 3: Durability Guarantee — fsync Issue
-
-**The Problem:**
-```cpp
-wal_file_ << data;
-wal_file_.flush();  // Only flushes to OS cache, not disk!
-```
-
-C++ `fstream::flush()` does NOT guarantee disk durability. OS can cache the write.
-
-**Options:**
-
-**A. Use raw file descriptors (POSIX):**
-```cpp
-int fd = open("mydb.wal", O_WRONLY | O_APPEND | O_CREAT);
-write(fd, data, size);
-fsync(fd);  // TRUE durability
-```
-
-**B. Document the limitation (Phase 1):**
-- Note that current implementation is "best-effort"
-- True durability requires fsync (add later)
-- Good enough for learning (process crashes are rare in dev)
-
-**Decision for Phase 1:** Document the limitation, use `flush()`.
-- Keeps code simple (std::fstream is easier than raw fd)
-- Add real fsync in Phase 2 when we care about real durability
-- Focus on understanding WAL protocol first
+**Tests (`tests/unit/wal/`):**
+- `log_record_test.cpp`: round-trip with full tuple, empty tuple, empty table
+  name, large tuple; `GetSize()` matches actual serialized bytes; first 4 bytes
+  are total size; type fits in one byte.
+- `log_manager_test.cpp`: empty file → zero records; append-then-read in order;
+  read on the same instance after appends; **torn body** treated as EOF;
+  **torn header** treated as EOF; `ClearLog` truncates and the handle is still
+  usable for further appends.
 
 ---
 
-### Design Decisions
+### Decisions & Why
 
-#### 1. Log Record Format
+**Variable-size logical records, not fixed-size physical records.**
+Postgres-style page-diff WAL would force us to define the page format first.
+Logical records ("insert this tuple into this table") are smaller, easier to
+reason about, and replay-able against any storage layout — fine for a learning
+project. Trade-off: replay must be deterministic (same input → same state).
 
-**Chosen:**
-```
-[uint32_t size][RecordType type][variable data]
-```
+**`uint32` size header that includes itself.**
+Recovery-friendly: the reader can advance exactly `total_size` bytes per record
+without re-deriving the length from the body. Making it self-inclusive means a
+single number is also enough to detect a corrupt header (`< sizeof(uint32_t)`).
 
-**Why:**
-- Size prefix allows reading records sequentially
-- Type byte enables multiple record types
-- Variable data = flexible (INSERT vs UPDATE have different payloads)
+**Torn tail = silent EOF, not error.**
+A crash mid-append is the *expected* failure mode for a WAL. Erroring out would
+make the file unreadable after a crash, which defeats the point. The contract
+is: "everything before the first incomplete record is durable, everything after
+it is gone." Recovery replays only what we return.
 
-**Alternative (fixed-size) rejected:**
-- Wastes space for variable-length data
-- Harder to extend with new record types
+**`flush()` instead of `fsync()` (for now).**
+Keeps Phase 1 portable and dependency-free (`std::fstream` only). The cost is
+acknowledged loudly in the header comment so we don't mistake it for real
+durability when Phase 3 lands.
 
----
+**One coarse mutex over the whole class.**
+Same rationale as the Phase A buffer pool: correctness first. Append is the hot
+path and is already serial at the device level — fine-grained locking can come
+when we have a workload to measure.
 
-#### 2. Append-Only Log File
-
-**Chosen:** Single `.wal` file, append-only writes
-
-**Why:**
-- Simple: no log rotation in Phase 1
-- Append-only = sequential I/O (fast on HDD/SSD)
-- Easy recovery: read file start to end
-
-**Future (Phase 3):** Add log truncation after checkpoints
-
----
-
-#### 3. Synchronous Append (No Buffering)
-
-**Chosen:** `flush()` after every `AppendLogRecord()`
-
-**Why:**
-- Simplest correct implementation
-- Each operation is immediately durable
-- No group commit complexity
-
-**Trade-off:**
-- Poor throughput (one fsync per write = slow)
-- Fine for learning, unacceptable for production
-- Can add group commit later (Phase 4)
+**Append mode + reset seekp after read.**
+`std::ios::app` forces every write to the end regardless of `seekp`, but
+`ReadAllLogRecords` still moves the read cursor; restoring `seekp(0, end)`
+keeps the invariant explicit and avoids relying on stream-mode subtleties.
 
 ---
 
-#### 4. No LSN/Transaction IDs (Phase 1)
+### Known Gaps (intentional)
 
-**Deferred to Phase 2:**
-- Log Sequence Numbers (LSNs) for ordering
-- Transaction IDs for multi-operation atomicity
-- BEGIN/COMMIT/ABORT records
-
-**Phase 1 focuses on:**
-- Single-operation logging
-- Basic serialization
-- Recovery replay mechanics
-
----
-
-### What's Implemented (But Not Tested)
-
-**Files exist:**
-```
-include/columnar_db/wal/
-  log_record.h      -> LogRecord serialization
-  log_manager.h     -> LogManager API
-
-src/wal/
-  log_record.cpp    -> (not created yet)
-  log_manager.cpp   -> (not created yet)
-  CMakeLists.txt    -> (not wired into build)
-```
-
-**API exists:**
-```cpp
-class LogManager {
-  void AppendLogRecord(const LogRecord& record);
-  std::vector<LogRecord> ReadAllLogRecords();
-  void ClearLog();
-};
-```
-
-**What's missing:**
-- Not wired into build (src/CMakeLists.txt doesn't include wal/)
-- No unit tests
-- Serialization logic untested
-- Recovery replay not implemented
+- **No checksums.** A bit-flip mid-record would deserialize into garbage
+  silently. Add a CRC32 per record when we care about media corruption, not
+  just torn tails.
+- **No LSN.** Records have no monotonic identifier yet. Needed before we can
+  wire WAL to a buffer pool (write-ahead invariant: "page LSN ≤ flushed WAL LSN
+  before page write-back").
+- **No txn record types.** Only `INSERT_TUPLE`. Replay of a partial transaction
+  would currently be wrong — but nothing replays yet, so it's not observable.
+- **`int64`-only tuples.** Mirrors the limited catalog. Generalize when the
+  catalog grows real types.
+- **WAL is not connected to anything.** No production write path calls
+  `AppendLogRecord` — there's no `QueryExecutor` in the new tree yet.
 
 ---
 
-### Next Steps — Closing Phase 1
+### Next Steps
 
-**To call WAL "Phase 1 complete":**
+In rough dependency order:
 
-1. **Build integration** (30 mins)
-   - Add `add_subdirectory(wal)` to src/CMakeLists.txt
-   - Create src/wal/CMakeLists.txt properly
-   - Verify library builds
+1. **Port the Catalog into the new layout.**
+   `old/include/catalog.h` + `old/src/storage/catalog.cpp` need to move under
+   `include/columnar_db/storage/` + `src/storage/`. Without it there's nothing
+   for an `INSERT_TUPLE` replay to land in, and `src/main/main.cpp` can't link.
 
-2. **Unit tests** (2 hours)
-   - Test LogRecord serialization round-trip
-   - Test LogManager append + read
-   - Test multiple records
-   - Test empty log
-   - Test clear and reuse
+2. **Add the recovery driver (`src/recovery/`).**
+   `add_subdirectory(recovery)` is already commented in `src/CMakeLists.txt:6`.
+   First version: `Recover(LogManager&, Catalog&, BufferPoolManager&)` —
+   `ReadAllLogRecords()` then apply each record, then `ClearLog()`. End-to-end
+   test: append records → destroy LogManager → recover into a fresh catalog →
+   assert state.
 
-3. **Fix known issues** (1 hour)
-   - Document flush() limitation
-   - Fix Deserialize contract (size-prefix handling)
-   - Handle seekp/seekg with std::ios::app mode
+3. **Wire WAL into the write path.**
+   Once the engine module is back, every mutating op has to call
+   `AppendLogRecord` *before* mutating the buffer pool (write-ahead invariant).
+   This is the point at which we'll need LSNs.
 
-4. **Documentation** (30 mins)
-   - Update this exploration log
-   - Mark Phase 1 complete in LEARNING_PLAN.md
-   - Note what worked, what didn't
+4. **Phase 2 record types.**
+   `BEGIN_TXN`, `COMMIT_TXN`, `ABORT_TXN`, `UPDATE_TUPLE`, `DELETE_TUPLE`,
+   `CREATE_TABLE`. Recovery becomes: redo committed txns, skip uncommitted ones
+   (no undo needed yet — we have no in-place updates).
 
-**After Phase 1:**
-- Move to Phase 2: Add LSNs, transactions, REDO logic
-- Integrate WAL with BufferPoolManager (flush-on-commit)
-- Build simple recovery test (crash simulator)
+5. **Phase 3 durability.**
+   Swap `std::fstream` for a raw `fd` (`open` + `write` + `fsync`). Optionally
+   batch flushes (group commit) once there's a real workload.
 
----
-
-### Testing Strategy
-
-**Unit tests for LogRecord:**
-1. Serialize INSERT record, deserialize, verify match
-2. Multiple record types (when added)
-3. Edge cases: empty tuple, max-size tuple
-
-**Unit tests for LogManager:**
-1. Append one record, read back
-2. Append multiple records, read all in order
-3. Empty log -> ReadAllLogRecords returns empty vector
-4. ClearLog then append -> starts fresh
-5. Reopen log file, records still there (persistence)
-
-**Integration test (Phase 2):**
-1. Modify page, log the change, flush WAL
-2. Crash simulator (kill process)
-3. Restart, replay log, verify change reappeared
+6. **Checksums + LSN header per record.**
+   Bump the wire format. Add a one-shot upgrade path or just refuse to read
+   v1 logs — fine for a learning project.
 
 ---
 
 ### References
 
-**Industry implementations:**
-- **PostgreSQL**: src/backend/access/transam/xlog.c (XLOG = WAL)
-- **SQLite**: WAL mode (wal.c)
-- **MySQL InnoDB**: redo log (log0log.cc)
-
-**Papers:**
-- ARIES recovery algorithm (comprehensive WAL + recovery)
-- "The Design and Implementation of a Log-Structured File System" (LFS paper)
-
-**Concepts:**
-- Write-ahead logging: log before modifying data
-- Durability: fsync guarantees disk write
-- Idempotency: safe to replay log records multiple times
-- Logical vs physical: operations vs bytes
+- Phase 1 source: `include/columnar_db/wal/`, `src/wal/`, `tests/unit/wal/`
+- Recent commits: `(add) wal support intial commit` → `io updates` → `wal work`
+- Inspirations: Postgres `xlog`/`xlogrecord.h` for record framing; SQLite WAL
+  for the "torn tail = EOF" idea; BusTub for the test shape.
 
 ---
 
-**Status:** Design drafted, code exists but untested. Ready to wire into build and add tests.
+**Status:** Phase 1 WAL complete and tested in isolation. Blocked on Catalog
+port before recovery and write-path integration can proceed.
 
+---
+
+## Session 4: Wiring WAL to the Write Path — Brainstorm (2026-05-01)
+
+### Problem Statement
+
+Phase 1 WAL exists and is tested in isolation, but **nothing in the new tree
+calls `AppendLogRecord`**. To make WAL load-bearing we need a write path that
+logs first, mutates second, *and is actually crash-safe* — not just "logs
+first." Crash safety has a subtle catch that the old `QueryExecutor` got wrong,
+and we want to get it right this time.
+
+**Requirements:**
+- A way to mutate state (something to insert *into*) — currently no Catalog or
+  Table in the new tree.
+- Every mutation logs before it touches the buffer pool.
+- A crash + restart cycle reproduces the pre-crash state.
+- The "write-ahead invariant" is actually enforced, not just *intended*.
+
+**Learning Goals:**
+- What "write-ahead" really means (it's not just call-order).
+- The role of LSN as the bridge between log records and pages.
+- Why the **buffer pool**, not the caller, is what makes WAL crash-safe.
+- The shape of a recovery driver and idempotent replay.
+
+---
+
+### The Three Lessons Hiding in This Task
+
+**Lesson 1 — Append-before-mutate (call-order).**
+Caller emits a `LogRecord` before it modifies a page. The old executor did
+this (`old/src/engine/query_executor.cpp:164`). Doing only this is **not**
+crash-safe — the buffer pool can still flush a modified page to disk before
+its log record reaches disk.
+
+**Lesson 2 — LSN as the bridge.**
+`AppendLogRecord` returns a monotonic `lsn_t`. The page that gets modified
+stamps that LSN into its `page_lsn` field. Recovery later compares LSNs to
+decide whether to re-apply a record (skip if `record.lsn ≤ page.page_lsn`).
+
+**Lesson 3 — The actual write-ahead invariant.**
+> *Page P with `page_lsn = L` may not be written to disk until WAL is flushed
+> up to LSN ≥ L.*
+
+Enforced by the **BufferPoolManager**, not the caller. BPM asks LogManager
+"what's your `flushed_wal_lsn`?" and refuses to flush a dirty page past that.
+This is what makes "log first" actually safe. Old code never did this — it
+had Lesson 1 only and was therefore lying to itself about durability.
+
+---
+
+### Ideas Explored
+
+**Option A — Single big slice (all three lessons + recovery at once).**
+~600+ LOC, one design doc, one push. Rejected: when something breaks, the
+learning gets blurred across multiple concepts. Hard to tell which piece
+taught you what.
+
+**Option B — Sliced by lesson (chosen).**
+Three small slices, each teaching one concept clearly. Each slice ends with
+something working and tested. Forces the user to feel the gap between "Slice
+1 is shipped" and "is this actually safe?" — which is exactly the moment
+Lesson 3 lands hardest.
+
+**Option C — Re-port the old executor first, fix WAL afterwards.**
+Fastest path to a working REPL but re-lives the old code's WAL bug.
+Rejected: the point of building the new tree is to do this *right*, not
+faster.
+
+---
+
+### Chosen Approach: Slice-by-Lesson (Option B)
+
+**Slice 1 — Logical wiring + recovery-from-scratch (in-memory). ← NEXT**
+
+The smallest end-to-end thing that proves WAL works. **No real storage yet
+— the write target is an in-memory map.** This keeps Slice 1 purely about
+WAL semantics; storage port lands in Slice 2 where it actually earns its
+keep (the BPM invariant requires real pages).
+
+- Tiny write API: `Database::Insert(table, tuple)` (no SQL parser yet).
+- The "tables" are an in-memory `std::map<std::string,
+  std::vector<std::vector<int64_t>>>` inside `Database`. BIGINT only.
+- `Database::Insert` calls `LogManager::AppendLogRecord` first, then mutates
+  the map. *(Lesson 1.)*
+- Recovery driver in `src/recovery/`: on startup, clear the map, replay
+  every record, then `ClearLog()`. No LSN needed — replay is idempotent
+  because the slate is wiped first.
+- Test: insert N tuples → destroy `Database` → recreate → run recovery →
+  assert `Scan` matches.
+
+What this teaches:
+- Append-before-mutate discipline.
+- The recovery driver shape (read all → apply all → clear).
+- *Why* "replay from scratch" forces every mutating op to be reachable from
+  log records alone — if `Insert` mutated state without logging, the rebuilt
+  state would be wrong.
+- That after Slice 1 ships, **the BPM can still violate the write-ahead
+  invariant** — but Slice 1 has no BPM in the write path, so the gap is
+  about *real persistence*, not *in-memory replay*. Slice 2 introduces
+  both real storage and the invariant in the same step.
+
+**Why no Catalog / Table in Slice 1:**
+Porting `old/Catalog` + `old/Table` is real storage work — it teaches
+columnar pages, page chains, BPM lifecycles. Worth doing, but it's not the
+WAL lesson. Conflating them blurs what Slice 1 is supposed to teach.
+
+**Effort:** ~150 LOC across `database.{h,cpp}`,
+`recovery_manager.{h,cpp}`, and one integration test.
+
+---
+
+**Slice 2 — Real storage + LSN + `page_lsn` + the BPM invariant.**
+
+The real WAL guarantee, plus the storage port that makes it meaningful.
+This is where Catalog / Table come in.
+
+Storage port (prerequisite for the rest):
+- Port `old/Catalog` + `old/Table` (`ColumnDataPage`) into the new tree.
+  Strip debug logging, adapt to the new `Page` API.
+- Replace `Database`'s in-memory map with real Catalog + Table calls.
+
+WAL invariant:
+- `LogManager::AppendLogRecord` returns `lsn_t`; track `flushed_wal_lsn_`.
+- Add `lsn_t page_lsn_` to `Page`. Stamp it after mutation.
+- Before flushing a dirty page, BPM ensures
+  `log_manager.flushed_wal_lsn() ≥ page.page_lsn()`. If not, force a WAL flush
+  first.
+- Recovery becomes incremental — skip records with `record.lsn ≤ page.page_lsn`
+  instead of replaying-from-scratch.
+
+What this teaches:
+- What makes WAL *actually* safe across persistent storage.
+- How buffer pool and log are coupled at the durability boundary.
+- The exact invariant most "I added logging" implementations get wrong.
+- (Bonus) naive columnar page layout from the old code, as a baseline for
+  later vectorized columnar work.
+
+**Effort:** ~350 LOC. Storage port is most of it; the WAL invariant itself
+is small.
+
+---
+
+**Slice 3 (optional, later) — REPL revival.**
+
+Re-port `QueryExecutor`, fix `src/main/main.cpp`. Mostly mechanical once
+Slices 1 and 2 are solid. Useful for hand-feel demos but no new database
+concepts.
+
+---
+
+### Confirmed Choices for Slice 1
+
+1. **Slice-1-first plan** (not merged with Slice 2). Feeling the gap is part
+   of the learning.
+2. **In-memory map as the write target** — *not* a port of `old/Table`.
+   Storage work is its own concern and lands in Slice 2 alongside the BPM
+   invariant. (Earlier draft had us porting `Catalog` + `Table` here; that
+   was scope creep — it's storage work, not WAL work.)
+3. **In-memory recovery test** (destroy `Database`, recreate, assert) — not
+   `kill -9`. Drama not worth the test plumbing.
+
+---
+
+### What This Slice Deliberately Defers
+
+Carried forward in `doc/design/wal/log_manager.md` § Deferred Work:
+
+- LSN allocation, `page_lsn`, the BPM write-ahead invariant → **Slice 2**.
+- Transactions (`BEGIN/COMMIT/ABORT`, multi-record atomicity) → Phase 3.
+- Real `fsync` durability (kernel-crash safety) → Phase 4.
+- Group commit, checkpoints, log truncation policy, CRC32 → Phase 5.
+- SQL REPL → Slice 3 / out of scope for the WAL learning arc.
+
+---
+
+### Conceptual Flow After Slice 1
+
+```
+test_recovery:
+  db = Database("mydb.wal")
+  db.CreateTable("users")
+  db.Insert("users", {1, 25})
+  db.Insert("users", {2, 30})
+  // (in real life: crash here)
+  destroy(db)
+
+  db2 = Database("mydb.wal")
+  db2.CreateTable("users")            // same schema, in-memory only
+  RecoveryManager::Recover(log, db2):
+    db2.ClearAll()                    // wipe in-memory state
+    for r in log.ReadAllLogRecords():
+      db2.Insert_NoLog(r.table, r.tuple)   // re-apply without re-logging
+    log.ClearLog()
+
+  assert db2.Scan("users") == [{1, 25}, {2, 30}]
+```
+
+The "wipe then replay" trick is brute-force but correct, and it makes
+Slice 1 work *without* LSNs. Slice 2 introduces real storage and replaces
+the wipe with selective LSN-based replay.
+
+Note: `CreateTable` is *not* logged in Slice 1 — only `INSERT_TUPLE` is, so
+the test re-creates the table after restart. `CREATE_TABLE` records arrive
+in Phase 3 (transactions).
+
+---
+
+### What We'll Learn Building This
+
+**Database concepts:**
+- Append-before-mutate as a discipline (and why it's insufficient alone).
+- Recovery driver lifecycle — read, apply, clear.
+- Idempotency strategies — replay-from-scratch vs. LSN-based skip.
+- The interaction between catalog (schema), heap (storage), WAL (log), and
+  recovery (replay).
+
+**C++ concepts:**
+- Cross-module wiring (Database owns Catalog + BPM + LogManager + Recovery).
+- Lifetime ordering on shutdown (flush dirty pages → close WAL).
+- Feeling out a clean module boundary for a stub component (`Database`).
+
+**Systems concepts:**
+- That logging and storage have to coordinate to be crash-safe.
+- That "test by destroy-and-rebuild" is a valid stand-in for `kill -9` early.
+
+---
+
+### Implementation Plan (high level)
+
+1. ✅ Brainstorm complete (this section).
+2. → Implement `Database` (in-memory map + `LogManager*`) in
+   `include/columnar_db/engine/` + `src/engine/`.
+3. → Implement `RecoveryManager` in `include/columnar_db/recovery/` +
+   `src/recovery/`.
+4. → Wire `engine` and `recovery` into `src/CMakeLists.txt`.
+5. → End-to-end test: `tests/integration/wal_recovery_test.cpp`.
+6. → Document learnings, then move to Slice 2 (storage port + LSN + BPM
+   invariant).
+
+No formal design doc this slice — scope is small enough to design as we
+code. The brainstorm is the foundation.
+
+---
+
+### Next Step
+
+Implement Slice 1 directly — `Database` (in-memory) + `RecoveryManager` +
+test. ~150 LOC, no formal design doc needed at this scope.
+
+---
+
+**Status:** Brainstorm complete. Slice 1 in progress (in-memory write API
++ recovery driver).
