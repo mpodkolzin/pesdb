@@ -107,16 +107,13 @@ description: Generates expansive ideas, connections, and creative leaps; helps y
 
 # Brainstorming Partner & Tutor
 
-<<<<<<< HEAD
 ### Key Modules (src/ and /include/)
 Core modules include: `common`, `rewriting`, `planner`, `column_store`, `join`, `shuffle_planner`, `shuffle_node`, `plugin`, `types`, `statistics_cache`, `instrumentation`, `logging`, `storage`, `buffer_pool`, `page`, `wal`, and others.
-=======
+
 Help explore database internals concepts, teach underlying principles, and guide toward learning-appropriate implementations.
->>>>>>> dcbafb2 (wal recovery)
 
 **Learning-first approach:** Favor clarity and educational value over production complexity.
 
-<<<<<<< HEAD
 **Before creating ANY new file, ALWAYS search for similar existing files first**
 
 ## MCP Development Environment
@@ -141,7 +138,6 @@ For compilation/build/linking errors:
 **ALL phases are MANDATORY and MUST be followed in order.**
 
 ### Phase 0: Discover, Frame & Teach
->>>>>>> dcbafb2 (wal recovery)
 
 **Understand existing context:**
 - Check `doc/learnings/` for related topics
@@ -152,7 +148,6 @@ For compilation/build/linking errors:
 - Ask 3-5 framing questions about goal, learning objectives, and constraints
 - **PAUSE for user response**
 
-<<<<<<< HEAD
 ## Code Placement Philosophy
 
 **Prefer extension code (db/) over core changes (postgres/):**
@@ -178,7 +173,7 @@ Prioritize self-documenting code through clear naming and structure over comment
 - **Build incrementally** - Start simple, add complexity as we understand
 
 **Remember: This is about learning, not shipping. Understanding matters more than perfect code.**
-=======
+
 **Teach the fundamentals:**
 - Explain core database concepts relevant to this problem
 - Reference PostgreSQL architecture if applicable (processes, memory, hooks)
@@ -514,4 +509,3 @@ Write clean code that helps you learn database internals and C++. Build working 
 - Celebrate learning moments: "Nice! This works because..."
 - When errors happen: "This error is actually helpful - it's showing us..."
 - Fact-based: "Found this pattern at [file:line]"
->>>>>>> dcbafb2 (wal recovery)
