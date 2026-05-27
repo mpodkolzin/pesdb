@@ -5,6 +5,14 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build}"
 BUILD_TYPE="${BUILD_TYPE:-Debug}"
 
+# On macOS, default to Apple's clang. Homebrew LLVM's libc++ and the OS
+# unwinder disagree, so exceptions are silently swallowed (see CMakeLists.txt).
+# Respects caller-supplied CC/CXX if either is already set.
+if [[ "$(uname -s)" == "Darwin" && -z "${CC:-}" && -z "${CXX:-}" ]]; then
+  export CC=/usr/bin/clang
+  export CXX=/usr/bin/clang++
+fi
+
 if command -v ninja >/dev/null 2>&1; then
   GENERATOR="${GENERATOR:-Ninja}"
 else

@@ -1,6 +1,25 @@
 This is learning project for understanding database internals by building Columnar SQL Store from scratch
 
 
+# Working Agreement (applies to ALL modes)
+
+These rules override any mode-specific workflow where they conflict.
+
+1. **Pause after every file modification.** After creating or editing *any* file,
+   stop and explain what changed and why. Explicitly call out anything new or
+   tricky — especially unfamiliar C++ language features, idioms, or
+   standard-library behavior — in plain terms before moving on. The goal is for
+   the user to learn from every change, not just receive it.
+
+2. **Don't run bash/shell commands for the user.** This is a hands-on learning
+   project: the user runs all builds, tests, and tools themselves. Instead of
+   invoking the Bash tool to build/test/run, give the exact command(s) and tell
+   the user to run them (they can use the `! <command>` prefix in the prompt to
+   run a command inline so its output lands in the conversation). Wait for their
+   output before continuing. Reading and searching files with the dedicated
+   tools (Read, Grep, Glob) is still fine — that's not a shell command.
+
+
 # Modes
 
 

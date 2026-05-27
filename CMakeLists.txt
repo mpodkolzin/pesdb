@@ -6,18 +6,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# When using Homebrew LLVM on macOS, the compiler uses its own (newer) libc++
-# headers but the linker defaults to the SDK's older libc++, producing
-# undefined symbols like std::__1::__hash_memory. Point the linker at
-# Homebrew LLVM's libc++ to keep header/runtime ABI in sync.
-if (APPLE AND CMAKE_CXX_COMPILER MATCHES "/opt/homebrew/.*/llvm/.*/clang\\+\\+$")
-  get_filename_component(_llvm_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-  get_filename_component(_llvm_prefix "${_llvm_bin_dir}" DIRECTORY)
-  set(_llvm_cxx_libdir "${_llvm_prefix}/lib/c++")
-  if (EXISTS "${_llvm_cxx_libdir}/libc++.dylib")
-    add_link_options("-L${_llvm_cxx_libdir}" "-Wl,-rpath,${_llvm_cxx_libdir}")
-  endif()
-endif()
+# Emit build/compile_commands.json so editors/clangd see real include paths
+# (otherwise they can't find columnar_db/* headers and show phantom errors).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# macOS: build with Apple's clang, not Homebrew LLVM.
+#   CC=/usr/bin/clang CXX=/usr/bin/clang++ ./build.sh
+# Homebrew LLVM ships its own libc++/libc++abi, but the stack unwinder is the
+# OS's (in libSystem) and cannot be replaced. The two disagree, so a `throw`
+# from any function with cleanup code is never caught -- every `catch` is
+# skipped and the process calls std::terminate. Apple clang + the SDK libc++
+# + the OS unwinder are mutually consistent, so exceptions work correctly.
 
 # Reuse fetched dependencies across builds by storing them in the source tree
 set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/.deps")

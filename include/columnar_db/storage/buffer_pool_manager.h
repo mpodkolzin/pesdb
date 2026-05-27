@@ -27,18 +27,21 @@ namespace db {
  * - **LRU Eviction**: Least Recently Used policy for choosing victim pages
  * - **Dirty Pages**: Modified pages must be written to disk before eviction
  *
- * **Phase A Characteristics (Simple):**
+ * **Current Characteristics (Simple):**
  * - Coarse-grained locking (hold latch for entire operation, including I/O)
  * - List-based LRU (simple move-to-front on access)
+ * - Write-before-evict: dirty victims are flushed to disk before reuse
  * - Focus on correctness over performance
  *
  * **Thread Safety Model:**
  * - latch_ protects: page_table_, free_list_, lru_list_, pin_count_, is_dirty_
  * - Page latch protects: page data content (separate from BufferPool latch)
  *
- * **Future Phases:**
- * - Phase B: Add write-before-evict for durability
- * - Phase C: Optimize concurrency (release latch during I/O)
+ * **Future Work:**
+ * - Write-ahead invariant: flush WAL up to page_lsn before evicting a page
+ *   (depends on WAL Phase 2 introducing page_lsn). See
+ *   doc/design/wal/log_manager.md § Deferred Work.
+ * - Optimize concurrency (release latch during I/O)
  *
  * Example Usage:
  * @code
@@ -201,10 +204,10 @@ class BufferPoolManager {
    * **Eviction policy: LRU (Least Recently Used)**
    * - Walks lru_list_ from back (oldest) to front (newest)
    * - Finds first frame with pin_count == 0
+   * - If the victim is dirty, flushes its page to disk before reuse
+   *   (write-before-evict — without this, modifications would be lost when
+   *   the frame is overwritten)
    * - Removes from page_table and lru_list_
-   *
-   * **Phase A limitation:** Does NOT write dirty pages before evicting.
-   * This will be fixed in Phase B for proper durability.
    *
    * @param[out] frame_id Set to victim frame_id if found
    * @return false if all pages are pinned (can't evict)

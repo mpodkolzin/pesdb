@@ -229,14 +229,17 @@ bool BufferPoolManager::FindVictimFrame(frame_id_t* frame_id) {
       *frame_id = candidate;
 
       // -----------------------------------------------------------------------
-      // Phase A: Simple eviction (NO write-before-evict)
+      // Write-before-evict: if the victim is dirty, persist it before the
+      // frame is reused. The page's modifications live only in this frame's
+      // memory; once the frame is overwritten by another page they are gone.
+      // Skipping this would silently lose committed data -- it is the core
+      // durability rule of a buffer pool.
       // -----------------------------------------------------------------------
-      // TODO Phase B: Add write-before-evict for durability
-      // if (pages_[candidate].IsDirty()) {
-      //   disk_manager_->WritePage(pages_[candidate].page_id(),
-      //                            pages_[candidate].data());
-      //   pages_[candidate].is_dirty_ = false;
-      // }
+      if (pages_[candidate].IsDirty()) {
+        disk_manager_->WritePage(pages_[candidate].page_id(),
+                                 pages_[candidate].data());
+        pages_[candidate].is_dirty_ = false;
+      }
 
       // Remove from metadata structures
       page_table_.erase(pages_[candidate].page_id());
