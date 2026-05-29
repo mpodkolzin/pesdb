@@ -1,80 +1,5 @@
 # PesDB - Learning Database Internals Through Building
 
-<<<<<<< HEAD
-This is a **learning project** to understand database internals by building a columnar SQL store from scratch. The focus is on learning, not production code.
-
-## Learning Goals
-
-1. **Refresh C++ knowledge** - Explain tricky concepts, idioms, and modern C++ patterns
-2. **Master database internals** - Understand how databases actually work by implementing them
-3. **Build working columnar storage** - Practical implementation that validates understanding
-
-## Working Approach
-
-### Design First, Then Code
-
-**ALWAYS follow this sequence:**
-
-1. **Propose Design** - Explain the approach before writing code
-   - "Here's how I think we should implement X..."
-   - Explain the database concept/algorithm
-   - Call out interesting tradeoffs or design choices
-   
-2. **Q&A Discussion** - Ask and answer questions
-   - Why this approach over alternatives?
-   - What are the implications?
-   - What could go wrong?
-   
-3. **Document Decision** - Store the design in `doc/design/{module}/`
-   - Capture the "why" not just the "what"
-   - Include alternatives considered and rejected
-   
-4. **Implement** - Write the code with understanding
-
-**NEVER jump straight to code.** If I ask for implementation without design, push back: "Let's design this first - here's what I'm thinking..."
-
-### Explain C++ Concepts
-
-When encountering tricky C++ (RAII, move semantics, templates, smart pointers, etc.):
-
-1. **Explain the concept** - What it is, why it exists, how it works
-2. **Show the pattern** - Code example in context
-3. **Store for reference** - Save to `doc/learnings/cpp/`
-
-Don't assume I remember everything. If it's non-trivial, explain it.
-
-### Explain Database Concepts
-
-When implementing database features (page layouts, buffer pools, WAL, indexes):
-
-1. **Explain the theory** - How do real databases do this?
-2. **Reference papers/systems** - "PostgreSQL does X, SQLite does Y"
-3. **Justify our approach** - Why are we doing it this way?
-4. **Store insights** - Save to `doc/learnings/database/`
-
-Build up a knowledge base as we go.
-
-## Documentation Organization
-
-### Design Documents (`doc/design/{module}/`)
-- **Purpose**: Design decisions for specific modules
-- **Format**: `.md` or `.adoc` files
-- **Content**: Problem -> Approach -> Alternatives -> Decision rationale
-- **When**: Before implementing a new module/feature
-
-### Learning Notes (`doc/learnings/`)
-- **`doc/learnings/cpp/`**: C++ concepts, patterns, gotchas
-- **`doc/learnings/database/`**: Database theory, algorithms, papers
-- **Format**: `.md` files, one concept per file
-- **Content**: Explanation -> Example -> Why it matters
-- **When**: Whenever we learn something worth remembering
-
-### User Documentation (`doc/user/`)
-- How to use the database (SQL, features, etc.)
-
-### Team Processes (`doc/team_processes/`)
-- Team workflows and processes
-=======
 
 # Working Agreement (applies to ALL modes)
 
@@ -96,8 +21,6 @@ These rules override any mode-specific workflow where they conflict.
 
 
 # Modes
-
->>>>>>> dcbafb2 (wal recovery)
 
 ## Brainstorming
 ---
@@ -132,7 +55,6 @@ For compilation/build/linking errors:
 2. Apply the fix
 3. Build again to confirm the error is resolved
 4. Report both results (error reproduced, then fixed)
-=======
 ## Workflow
 
 **ALL phases are MANDATORY and MUST be followed in order.**
