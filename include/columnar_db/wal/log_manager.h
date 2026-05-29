@@ -33,9 +33,14 @@ public:
     LogManager(LogManager&&) = delete;
     LogManager& operator=(LogManager&&) = delete;
 
-    // Serializes `record`, appends it to the WAL file, and flushes the C++
-    // stream buffer to the OS. See class doc for the durability caveat.
-    void AppendLogRecord(const LogRecord& record);
+    // Allocates the next LSN, stamps it into `record`, serializes, appends to
+    // the WAL file, and flushes the C++ stream buffer to the OS. Returns the
+    // LSN that was assigned. See class doc for the durability caveat.
+    //
+    // Takes `record` by value: callers move a freshly-built record in
+    // (`AppendLogRecord(std::move(rec))`) so the string/vector are stolen, not
+    // copied, and the function can stamp the LSN without a const_cast.
+    lsn_t AppendLogRecord(LogRecord record);
 
     // Reads every fully-written record from the start of the file.
     // A torn tail (partial size header or partial body, e.g. from a crash
@@ -48,9 +53,23 @@ public:
     void ClearLog();
 
 private:
+    // Walks the file from byte 0, decoding each fully-written record (a torn
+    // tail is treated as end-of-log, same rules as ReadAllLogRecords) and
+    // invoking visit(LogRecord). Restores the put-pointer to end-of-file.
+    // Caller must hold latch_ (hence the *Locked suffix).
+    //
+    // Defined in the .cpp: it's a template, but every instantiation lives in
+    // log_manager.cpp, so the definition doesn't need to be in this header.
+    template <typename Visit>
+    void ScanLogLocked(Visit visit);
+
     std::string wal_file_name_;
     std::fstream wal_file_;
     std::mutex latch_;
+
+    // Next LSN to hand out. Starts at 1 for a fresh log; the constructor scans
+    // an existing WAL and sets this to max-LSN-on-disk + 1. Guarded by latch_.
+    lsn_t next_lsn_{1};
 };
 
 } // namespace db

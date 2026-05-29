@@ -38,6 +38,15 @@ using frame_id_t = int32_t;
 using lsn_t = int64_t;
 
 /**
+ * INVALID_LSN: Sentinel for "this record has no LSN yet"
+ *
+ * A LogRecord constructed in memory carries INVALID_LSN until LogManager
+ * stamps a real value during append. Real LSNs start at 1, mirroring the
+ * INVALID_PAGE_ID sentinel pattern used elsewhere.
+ */
+constexpr lsn_t INVALID_LSN = 0;
+
+/**
  * txn_id_t: Transaction identifier
  *
  * Unique identifier for each transaction

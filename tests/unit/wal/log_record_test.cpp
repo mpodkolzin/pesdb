@@ -23,6 +23,23 @@ TEST(LogRecordTest, RoundTripPreservesAllFields) {
   EXPECT_EQ(out.GetTuple(), (std::vector<int64_t>{1, 25}));
 }
 
+TEST(LogRecordTest, RoundTripPreservesLSN) {
+  LogRecord r(LogRecordType::INSERT_TUPLE, "users", {1, 25});
+  r.SetLSN(42);
+  std::vector<char> buf(r.GetSize());
+  r.Serialize(buf.data());
+
+  LogRecord out(LogRecordType::INVALID, "", {});
+  LogRecord::Deserialize(buf.data(), out);
+
+  EXPECT_EQ(out.GetLSN(), 42);
+}
+
+TEST(LogRecordTest, FreshRecordHasInvalidLSN) {
+  LogRecord r(LogRecordType::INSERT_TUPLE, "users", {1});
+  EXPECT_EQ(r.GetLSN(), INVALID_LSN);
+}
+
 TEST(LogRecordTest, RoundTripEmptyTuple) {
   LogRecord r(LogRecordType::INSERT_TUPLE, "t", {});
   std::vector<char> buf(r.GetSize());

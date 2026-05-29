@@ -135,4 +135,43 @@ TEST_F(LogManagerTest, ClearLogTruncatesAndKeepsHandleUsable) {
   EXPECT_EQ(records[0].GetTuple(), (std::vector<int64_t>{2}));
 }
 
+TEST_F(LogManagerTest, AppendReturnsAssignedLSN) {
+  LogManager lm(wal_file_);
+  EXPECT_EQ(lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {1})), 1);
+  EXPECT_EQ(lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {2})), 2);
+  EXPECT_EQ(lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {3})), 3);
+}
+
+TEST_F(LogManagerTest, ReadAllReturnsRecordsCarryingTheirLSNs) {
+  LogManager lm(wal_file_);
+  lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {1}));
+  lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {2}));
+
+  auto records = lm.ReadAllLogRecords();
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_EQ(records[0].GetLSN(), 1);
+  EXPECT_EQ(records[1].GetLSN(), 2);
+}
+
+TEST_F(LogManagerTest, ReopenedLogManagerContinuesNumbering) {
+  {
+    LogManager lm(wal_file_);
+    lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {1}));
+    lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {2}));
+  }
+
+  // A fresh instance must scan the existing WAL and resume at max+1, not 1.
+  LogManager lm2(wal_file_);
+  EXPECT_EQ(lm2.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {3})), 3);
+}
+
+TEST_F(LogManagerTest, ClearLogResetsNumberingToOne) {
+  LogManager lm(wal_file_);
+  lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {1}));
+  lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {2}));
+
+  lm.ClearLog();
+  EXPECT_EQ(lm.AppendLogRecord(LogRecord(LogRecordType::INSERT_TUPLE, "t", {3})), 1);
+}
+
 }  // namespace db

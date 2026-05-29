@@ -23,7 +23,7 @@ enum class LogRecordType : uint8_t {
  * For simplicity, we are making this a "logical" log record.
  * It's not fixed-size; it's serialized to the WAL file.
  * We'll use a simple format:
- * [size_in_bytes] [LogRecordType] [table_name] [tuple_data]
+ * [size_in_bytes] [lsn] [LogRecordType] [table_name] [tuple_data]
  */
 class LogRecord {
 public:
@@ -44,11 +44,17 @@ public:
     uint32_t GetSize() const;
 
     // --- Getters ---
+    lsn_t GetLSN() const { return lsn_; }
     LogRecordType GetType() const { return type_; }
     const std::string& GetTableName() const { return table_name_; }
     const std::vector<int64_t>& GetTuple() const { return tuple_; }
 
+    // Stamps the LSN assigned at append time. Used only by LogManager, under
+    // its latch, between constructing the record and serializing it.
+    void SetLSN(lsn_t lsn) { lsn_ = lsn; }
+
 private:
+    lsn_t lsn_{INVALID_LSN};
     LogRecordType type_{LogRecordType::INVALID};
     std::string table_name_;
     std::vector<int64_t> tuple_;
