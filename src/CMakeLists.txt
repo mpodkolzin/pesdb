@@ -1,6 +1,7 @@
 # Add source subdirectories
 add_subdirectory(storage)
 add_subdirectory(wal)
+add_subdirectory(ingest)
 add_subdirectory(engine)     # Slice 1: Database (in-memory write API over WAL)
 add_subdirectory(recovery)   # Slice 1: replays WAL into Database on startup
 

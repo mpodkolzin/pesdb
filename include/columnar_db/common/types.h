@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 namespace db {
 
@@ -51,20 +52,42 @@ using txn_id_t = int32_t;
 using timestamp_t = uint64_t;
 
 // ============================================================================
-// Data Types (Phase 2-3 - Future)
+// Data Types
 // ============================================================================
 
 /**
  * DataType: Supported column data types
  *
- * Phase 1-2: Only BIGINT (fixed-width, simple)
- * Phase 3+: Add VARCHAR, DOUBLE, etc.
+ * Underlying type is uint8_t for stable wire format (serialization)
+ * Each type has a fixed encoding for on-disk storage
  */
-enum class DataType {
+enum class DataType : uint8_t {
   INVALID = 0,
-  BIGINT = 1,   // 8-byte signed integer
-  // DOUBLE = 2,   // 8-byte floating point (future)
-  // VARCHAR = 3,  // Variable-length string (future)
+  INT64   = 1,   // 8-byte signed integer
+  FLOAT64 = 2,   // 8-byte IEEE 754 double precision
+  BOOL    = 3,   // 1-byte boolean (0x00=false, 0x01=true)
+  STRING  = 4    // Variable-length string (length-prefixed, no null terminator)
 };
+
+/**
+ * Get fixed size for a type (0 for variable-size types like STRING)
+ */
+inline size_t GetTypeSize(DataType type) {
+  switch (type) {
+    case DataType::INT64:   return 8;
+    case DataType::FLOAT64: return 8;
+    case DataType::BOOL:    return 1;
+    case DataType::STRING:  return 0;  // Variable size
+    case DataType::INVALID: return 0;
+  }
+  return 0;
+}
+
+/**
+ * Check if type is fixed-size
+ */
+inline bool IsFixedSize(DataType type) {
+  return GetTypeSize(type) > 0;
+}
 
 }  // namespace db

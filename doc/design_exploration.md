@@ -2,6 +2,40 @@
 
 This document captures brainstorming sessions and design decisions made during the learning journey.
 
+**See also:** [../LEARNING_PLAN.md](../LEARNING_PLAN.md) for overall project roadmap and phases.
+
+---
+
+## Current Status (2026-05-12)
+
+**Phase**: 1 - Storage Foundation
+**Progress**: ~80% complete
+
+### What's Working
+- Page abstraction (in-memory representation)
+- Disk Manager (file I/O, page allocation)
+- Buffer Pool Manager (mostly working)
+- Basic tests passing (34/35)
+
+### Recently Fixed
+- ✅ BufferPool LRU eviction bug (2026-05-12)
+  - **Problem**: Evicted dirty pages lost data (test expecting "Page 0", got "")
+  - **Root cause**: Write-before-evict code was commented out in FindVictimFrame()
+  - **Fix**: Enabled dirty page flush before eviction (lines 235-239)
+  - **Learning**: This is THE critical durability pattern - evicting dirty pages without flushing = data loss!
+  - **Tests**: All 35 storage tests now passing (was 34/35)
+
+### What's Next
+1. ✅ ~~Fix eviction bug~~ (DONE - write-before-evict enabled)
+2. Wire WAL into build system
+   - Add `add_subdirectory(wal)` to src/CMakeLists.txt
+   - Create proper src/wal/CMakeLists.txt
+3. Add WAL unit tests
+   - LogRecord serialization round-trip
+   - LogManager append + read
+4. Test WAL integration with BufferPool
+5. Move to Phase 2 (Recovery implementation)
+
 ---
 
 ## Session 1: Page Class Design (2026-01-08)
